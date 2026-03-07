@@ -1,0 +1,100 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# Database
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# PDFs dos usuários
+data/pdfs/*
+!data/pdfs/.gitkeep
+
+# Cache
+data/cache/*
+!data/cache/.gitkeep
+*.pyc
+__pycache__/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# API Keys e Configurações Locais
+.env
+config_local.py
+*.key
+*.pem
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Virtual environments
+.venv/
+venv/
+
+# Android/Gradle
+.gradle-local/
+.gradle/
+.android_pack_src/
+.android_pack_src*/
+
+# APK/AAB gerados localmente
+*.apk
+*.aab
+
+# Codex local workspace metadata
+.agents/

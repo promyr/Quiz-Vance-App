@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "sections": [
+    {
+      "key": "disciplinas",
+      "label": "Disciplinas",
+      "options": [
+        { "id": "direito_constitucional", "label": "Direito Constitucional" },
+        { "id": "direito_administrativo", "label": "Direito Administrativo" },
+        { "id": "direito_penal", "label": "Direito Penal" },
+        { "id": "processo_penal", "label": "Processo Penal" },
+        { "id": "portugues", "label": "Portugues" },
+        { "id": "matematica", "label": "Matematica" },
+        { "id": "raciocinio_logico", "label": "Raciocinio Logico" },
+        { "id": "informatica", "label": "Informatica" },
+        { "id": "gestao_publica", "label": "Gestao Publica" },
+        { "id": "contabilidade", "label": "Contabilidade" },
+        { "id": "legislacao_especial", "label": "Legislacao Especial" },
+        { "id": "administracao_geral", "label": "Administracao Geral" },
+        { "id": "administracao_publica", "label": "Administracao Publica" },
+        { "id": "etica_servico_publico", "label": "Etica no Servico Publico" }
+      ]
+    },
+    {
+      "key": "assuntos",
+      "label": "Assuntos",
+      "options": [
+        { "id": "principios", "label": "Principios" },
+        { "id": "competencias", "label": "Competencias" },
+        { "id": "atos_administrativos", "label": "Atos administrativos" },
+        { "id": "poderes_administracao", "label": "Poderes da administracao" },
+        { "id": "licitacoes", "label": "Licitacoes" },
+        { "id": "responsabilidade_civil_estado", "label": "Responsabilidade civil do estado" },
+        { "id": "controle_administracao", "label": "Controle da administracao" },
+        { "id": "servidor_publico", "label": "Servidor publico" },
+        { "id": "contratos", "label": "Contratos" },
+        { "id": "seguranca_informacao", "label": "Seguranca da informacao" },
+        { "id": "redes", "label": "Redes" },
+        { "id": "banco_dados", "label": "Banco de dados" }
+      ]
+    },
+    {
+      "key": "bancas",
+      "label": "Bancas",
+      "options": [
+        { "id": "cespe_cebraspe", "label": "CESPE/CEBRASPE" },
+        { "id": "fgv", "label": "FGV" },
+        { "id": "vunesp", "label": "VUNESP" },
+        { "id": "fcc", "label": "FCC" },
+        { "id": "ibfc", "label": "IBFC" },
+        { "id": "aocp", "label": "AOCP" },
+        { "id": "iades", "label": "IADES" },
+        { "id": "fundatec", "label": "FUNDATEC" }
+      ]
+    },
+    {
+      "key": "cargos",
+      "label": "Cargos",
+      "options": [
+        { "id": "analista", "label": "Analista" },
+        { "id": "tecnico", "label": "Tecnico" },
+        { "id": "assistente", "label": "Assistente" },
+        { "id": "agente", "label": "Agente" },
+        { "id": "policial", "label": "Policial" },
+        { "id": "fiscal", "label": "Fiscal" },
+        { "id": "auditor", "label": "Auditor" },
+        { "id": "professor", "label": "Professor" },
+        { "id": "desenvolvedor", "label": "Desenvolvedor" },
+        { "id": "infraestrutura", "label": "Infraestrutura" }
+      ]
+    },
+    {
+      "key": "anos",
+      "label": "Anos",
+      "year_range": {
+        "start": 2015,
+        "end": "current",
+        "descending": true
+      }
+    },
+    {
+      "key": "status",
+      "label": "Status",
+      "options": [
+        {
+          "id": "nao_resolvi",
+          "label": "Nao resolvi",
+          "aliases": ["Nao resolvidas", "Não resolvidas", "nao_resolvidas"]
+        },
+        {
+          "id": "resolvi",
+          "label": "Resolvi",
+          "aliases": ["Resolvidas", "revisao pendente"]
+        },
+        {
+          "id": "acertei",
+          "label": "Acertei",
+          "aliases": ["Corretas", "Acertos"]
+        },
+        {
+          "id": "errei",
+          "label": "Errei",
+          "aliases": ["Erradas", "Erradas recentes", "Marcadas com erro"]
+        }
+      ]
+    }
+  ]
+}
