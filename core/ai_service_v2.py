@@ -1088,34 +1088,54 @@ class AIService:
                 txt = " ".join(str(q or "").split()).strip()
                 if txt:
                     itens_bloqueio.append(txt[:180])
-                if len(itens_bloqueio) >= 12:
+                if len(itens_bloqueio) >= 20:
                     break
             if itens_bloqueio:
-                avoid_block = "PERGUNTAS JA GERADAS (NAO REPETIR NEM PARAFRASEAR):\n"
+                avoid_block = "HISTORICO — nao recrie nem parafraseie estas perguntas:\n"
                 avoid_block += "\n".join(f"- {item}" for item in itens_bloqueio)
                 avoid_block += "\n"
 
-        prompt = f"""
+        # Instrucao de profundidade por nivel
+        _nivel_map = {
+            "facil":         "FACIL: conceito central direto; distratores erram um detalhe concreto.",
+            "medio":         "INTERMEDIARIO: exija relacao causa-efeito ou aplicacao do conceito; distratores invertem a logica.",
+            "intermediario": "INTERMEDIARIO: exija relacao causa-efeito ou aplicacao do conceito; distratores invertem a logica.",
+            "dificil":       "DIFICIL: questao-problema com raciocinio de multiplas etapas; distratores sao conclusoes parcialmente corretas.",
+        }
+        nivel_instrucao = _nivel_map.get(str(difficulty or "").lower(), _nivel_map["intermediario"])
+
+        # Sequencia sugerida de correta_index para evitar vies posicional
+        indices_seq = ", ".join(str(i % 4) for i in range(quantidade))
+
+        prompt = f"""Voce e um elaborador senior de questoes para concursos publicos brasileiros de alto nivel (CESPE, FCC, VUNESP).
+
 {contexto}
 {avoid_block}
+Nivel: {nivel_instrucao}
+Gere EXATAMENTE {quantidade} questao(oes) novas.
 
-Crie {quantidade} questoes de multipla escolha nivel {difficulty}.
+REGRAS OBRIGATORIAS:
+1. Use exclusivamente o conteudo do material acima. Nunca invente fatos externos.
+2. Perguntas autonomas: proibido usar "segundo o texto", "conforme o trecho" ou similar.
+3. Proibido decoreba ("O que e X?"). Exija raciocinio, comparacao ou aplicacao.
+4. Ignore metadados do material (autor, ISBN, editora, edicao, datas, sumario, codigos de curso).
+5. Cada distrator deve usar conceito real do material, mas aplicado no contexto errado.
+6. Varie os valores de correta_index — sequencia sugerida: [{indices_seq}].
+7. Se nao houver base suficiente no texto, retorne [].
 
-REGRAS:
-- Use apenas conteudo conceitual do texto base.
-- Nao invente fatos fora do material.
-- Nao cite metadados/editorial: nome de curso, codigos EMA/CIAA, capitulo/secao/anexo, prefacio/sumario/edicao/publicacao/manual.
-- Evite perguntas repetidas ou parafraseadas e varie os subtemas.
-- Se nao houver base suficiente no texto, retorne [].
+LIMITES DE CARACTERES (ultrapassar causa descarte):
+- "pergunta"   : max 280 chars
+- cada "opcoes": max 90 chars, SEM prefixos "A)" "B)" etc.
+- "explicacao" : max 190 chars
 
-Retorne APENAS JSON valido:
+Retorne APENAS JSON valido, sem markdown, sem texto antes ou depois:
 [
   {{
-    "pergunta": "Texto da pergunta...",
+    "pergunta": "Enunciado tecnico e direto",
     "subtema": "Subtema curto",
-    "opcoes": ["A. Primeira opcao", "B. Segunda opcao", "C. Terceira opcao", "D. Quarta opcao"],
+    "opcoes": ["Opcao correta", "Distrator 1", "Distrator 2", "Distrator 3"],
     "correta_index": 0,
-    "explicacao": "Explicacao breve da resposta correta..."
+    "explicacao": "Razao objetiva da resposta correta."
   }}
 ]
 """

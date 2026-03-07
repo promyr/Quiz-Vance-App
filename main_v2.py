@@ -65,6 +65,19 @@ from ui.design_system import DS, AppText, ds_card, ds_btn_primary, ds_btn_ghost,
 def _build_quiz_body(state, navigate, dark: bool):
     return _ext_build_quiz_body(state, navigate, dark)
 
+# --- Rotação de assuntos e deduplicação de questões ---
+try:
+    from quiz_rotation import (
+        pick_rotation_chunks as _pick_rotation_chunks,
+        build_evitar_block as _build_evitar_block,
+        filter_new_questions as _filter_new_questions,
+        register_seen as _register_seen,
+    )
+    from quiz_prompt_v2 import validate_question as _validate_question, sanitize_question as _sanitize_question
+    _QUIZ_ROTATION_ENABLED = True
+except ImportError:
+    _QUIZ_ROTATION_ENABLED = False
+
 # --- Helpers extraídos (Fase 2 refatoração) ---
 from core.helpers.ai_helpers import (
     normalize_ai_provider as _normalize_ai_provider,
@@ -107,13 +120,14 @@ from core.helpers.ui_helpers import (
 APP_ROUTES = [
     ("/home",       "Inicio",    ft.Icons.HOME_OUTLINED),
     ("/quiz",       "Questoes",  ft.Icons.QUIZ_OUTLINED),
-    ("/revisao",    "Revisao",   ft.Icons.MENU_BOOK_OUTLINED),
-    ("/flashcards", "Cards",     ft.Icons.LAYERS_OUTLINED),
+    ("/revisao",    "Revisao",   ft.Icons.STYLE_OUTLINED),
+    ("/flashcards", "Cards",     ft.Icons.STYLE_OUTLINED),
     ("/mais",       "Mais",      ft.Icons.GRID_VIEW_OUTLINED),
 ]
 
 # Rotas secundarias - acessiveis via /mais (hub)
 APP_ROUTES_SECONDARY = [
+    ("/flashcards",  "Flashcards",    ft.Icons.STYLE_OUTLINED),
     ("/open-quiz",   "Dissertativo",  ft.Icons.EDIT_NOTE_OUTLINED),
     ("/library",     "Biblioteca",    ft.Icons.LOCAL_LIBRARY_OUTLINED),
     ("/stats",       "Estatisticas",  ft.Icons.INSIGHTS_OUTLINED),
@@ -123,6 +137,610 @@ APP_ROUTES_SECONDARY = [
     ("/plans",       "Planos",        ft.Icons.STARS_OUTLINED),
     ("/settings",    "Configuracoes", ft.Icons.SETTINGS_OUTLINED),
 ]
+
+_AI_KEY_PROVIDERS = ("gemini", "openai", "groq")
+
+
+def _normalize_ai_provider(value: str) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in _AI_KEY_PROVIDERS else "gemini"
+
+
+def _provider_api_field(provider: str) -> str:
+    return f"api_key_{_normalize_ai_provider(provider)}"
+
+
+def _extract_user_api_keys(usuario: Optional[dict]) -> dict[str, str]:
+    user = usuario or {}
+    keys: dict[str, str] = {}
+    for p in _AI_KEY_PROVIDERS:
+        keys[p] = str(user.get(_provider_api_field(p)) or "").strip()
+    legacy = str(user.get("api_key") or "").strip()
+    if legacy and not any(bool(v) for v in keys.values()):
+        provider = _normalize_ai_provider(user.get("provider") or "gemini")
+        keys[provider] = legacy
+    return keys
+
+
+def _resolve_user_api_key(usuario: Optional[dict], provider: Optional[str] = None) -> str:
+    user = usuario or {}
+    provider_key = _normalize_ai_provider(provider or user.get("provider") or "gemini")
+    keys = _extract_user_api_keys(user)
+    active = str(keys.get(provider_key) or "").strip()
+    if active:
+        return active
+    if not any(bool(v) for v in keys.values()):
+        return str(user.get("api_key") or "").strip()
+    return ""
+
+
+def _create_user_ai_service(usuario: dict, force_economic: bool = False) -> Optional[AIService]:
+    if not usuario:
+        return None
+    provider_type = _normalize_ai_provider(usuario.get("provider") or "gemini")
+    api_key = _resolve_user_api_key(usuario, provider_type)
+    if not api_key:
+        return None
+    provider_config = AI_PROVIDERS.get(provider_type, AI_PROVIDERS["gemini"])
+    model_value = usuario.get("model") or provider_config.get("default_model")
+    economia_mode = bool(usuario.get("economia_mode"))
+    if economia_mode or force_economic:
+        if provider_type == "gemini":
+            model_value = "gemini-2.5-flash-lite"
+        elif provider_type == "openai":
+            model_value = "gpt-5-nano"
+        elif provider_type == "groq":
+            model_value = "llama-3.1-8b-instant"
+    anon_raw = str(usuario.get("id") or usuario.get("email") or "anon")
+    user_anon = hashlib.sha256(anon_raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    telemetry_opt_in = bool(usuario.get("telemetry_opt_in"))
+    try:
+        return AIService(
+            create_ai_provider(provider_type, api_key, model_value),
+            telemetry_opt_in=telemetry_opt_in,
+            user_anon=user_anon,
+        )
+    except Exception as ex:
+        log_exception(ex, "main._create_user_ai_service")
+        return None
+
+
+def _emit_opt_in_event(
+    usuario: Optional[dict],
+    event_name: str,
+    feature_name: str,
+    latency_ms: int = 0,
+    error_code: str = "",
+):
+    if not usuario or not bool(usuario.get("telemetry_opt_in")):
+        return
+    anon_raw = str(usuario.get("id") or usuario.get("email") or "anon")
+    payload = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds") + "Z",
+        "feature_name": str(feature_name or "app"),
+        "provider": str(usuario.get("provider") or ""),
+        "model": str(usuario.get("model") or ""),
+        "latency_ms": int(max(0, latency_ms or 0)),
+        "error_code": str(error_code or ""),
+        "user_anon": hashlib.sha256(anon_raw.encode("utf-8", errors="ignore")).hexdigest()[:16],
+    }
+    try:
+        log_event(event_name, json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _build_focus_header(title: str, flow: str, etapa_control: ft.Control, dark: bool):
+    stage_chip = ft.Container(
+        padding=ft.padding.symmetric(horizontal=10, vertical=4),
+        border_radius=999,
+        bgcolor=ft.Colors.with_opacity(0.10, CORES["primaria"]),
+        content=etapa_control,
+    )
+    return ft.Container(
+        padding=ft.padding.only(bottom=6),
+        content=ft.Column(
+            [
+                ft.Text(title, size=28, weight=ft.FontWeight.BOLD, color=_color("texto", dark)),
+                ft.Text(flow, size=14, color=_color("texto_sec", dark)),
+                stage_chip,
+            ],
+            spacing=6,
+        ),
+    )
+
+
+def _is_ai_quota_exceeded(service: Optional[AIService]) -> bool:
+    if not service:
+        return False
+    provider = getattr(service, "provider", None)
+    kind = str(getattr(provider, "last_error_kind", "") or "").lower()
+    if kind in {"quota_hard", "quota_soft"}:
+        return True
+    msg = str(getattr(provider, "last_error_message", "") or "").lower()
+    return ("quota exceeded" in msg) or ("429" in msg) or ("rate limit" in msg)
+
+
+def _show_dialog_compat(page: Optional[ft.Page], dialog: ft.AlertDialog):
+    if not page:
+        return
+    # Flet 0.80+ API
+    if hasattr(page, "show_dialog"):
+        page.show_dialog(dialog)
+        return
+    # Legacy fallback
+    if hasattr(page, "open"):
+        page.open(dialog)
+        return
+    # Last-resort fallback for older runtimes
+    try:
+        page.dialog = dialog
+        dialog.open = True
+        page.update()
+    except Exception:
+        pass
+
+
+def _close_dialog_compat(page: Optional[ft.Page], dialog: Optional[ft.AlertDialog] = None):
+    if not page:
+        return
+    # Flet 0.80+ API
+    if hasattr(page, "pop_dialog"):
+        try:
+            page.pop_dialog()
+            return
+        except Exception:
+            pass
+    # Legacy fallback
+    if dialog is not None and hasattr(page, "close"):
+        try:
+            page.close(dialog)
+            return
+        except Exception:
+            pass
+    # Last-resort fallback
+    if dialog is not None:
+        try:
+            dialog.open = False
+            page.update()
+        except Exception:
+            pass
+
+
+def _launch_url_compat(page: Optional[ft.Page], url: str, ctx: str = "launch_url"):
+    if not page:
+        return
+    link = str(url or "").strip()
+    if not link:
+        return
+    try:
+        result = page.launch_url(link)
+        if asyncio.iscoroutine(result):
+            async def _await_result():
+                try:
+                    await result
+                except Exception as ex:
+                    log_exception(ex, f"{ctx}.await")
+            page.run_task(_await_result)
+    except Exception as ex:
+        log_exception(ex, ctx)
+
+
+def _show_quota_dialog(page: Optional[ft.Page], navigate):
+    if not page:
+        return
+    dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("Cota da IA esgotada"),
+        content=ft.Text(
+            "As cotas atuais da API acabaram. Voce prefere inserir uma nova API key "
+            "ou mudar o modelo/provedor (Gemini/OpenAI/Groq)?"
+        ),
+    )
+
+    def _to_settings(_):
+        _close_dialog_compat(page, dialog)
+        navigate("/settings")
+
+    def _continue_offline(_):
+        _close_dialog_compat(page, dialog)
+
+    dialog.actions = [
+        ft.TextButton("Continuar offline", on_click=_continue_offline),
+        ft.TextButton("Inserir nova API", on_click=_to_settings),
+        ft.ElevatedButton("Mudar modelo (Gemini/OpenAI/Groq)", on_click=_to_settings),
+    ]
+    dialog.actions_alignment = ft.MainAxisAlignment.END
+    _show_dialog_compat(page, dialog)
+
+
+def _is_premium_active(usuario: dict) -> bool:
+    return bool(usuario and int(usuario.get("premium_active") or 0) == 1)
+
+
+def _should_show_welcome_offer(usuario: Optional[dict]) -> bool:
+    """Tela de vantagens deve aparecer no login para quem nao esta premium ativo."""
+    return not _is_premium_active(usuario or {})
+
+
+def _backend_user_id(usuario: dict) -> int:
+    try:
+        backend_uid = int(usuario.get("backend_user_id") or 0)
+        return backend_uid if backend_uid > 0 else 0
+    except Exception:
+        return 0
+
+
+def _build_quiz_stats_event_payload(correta: bool, delta: dict) -> dict:
+    now_iso = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat() + "Z"
+    raw = f"{now_iso}|{int(delta.get('questoes_delta', 0) or 0)}|{int(delta.get('acertos_delta', 0) or 0)}|{int(delta.get('xp_ganho', 0) or 0)}|{1 if bool(correta) else 0}|{random.random()}"
+    event_id = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:40]
+    return {
+        "event_id": event_id,
+        "questoes_delta": int(delta.get("questoes_delta", 0) or 0),
+        "acertos_delta": int(delta.get("acertos_delta", 0) or 0),
+        "xp_delta": int(delta.get("xp_ganho", 0) or 0),
+        "correta": bool(correta),
+        "occurred_at": now_iso,
+    }
+
+
+def _generation_profile(usuario: dict, feature_key: str) -> dict:
+    if _is_premium_active(usuario):
+        return {"force_economic": False, "delay_s": 0.0, "label": "premium"}
+    if feature_key in {"quiz", "flashcards"}:
+        return {"force_economic": True, "delay_s": 0.0, "label": "free_fast"}
+    return {"force_economic": False, "delay_s": 0.0, "label": "free"}
+
+
+def _show_upgrade_dialog(page: Optional[ft.Page], navigate, message: str):
+    if not page:
+        return
+    dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("Recurso Premium"),
+        content=ft.Text(message),
+    )
+
+    def _go_plans(_):
+        _close_dialog_compat(page, dialog)
+        navigate("/plans")
+
+    dialog.actions = [
+        ft.TextButton("Depois", on_click=lambda _: _close_dialog_compat(page, dialog)),
+        ft.ElevatedButton("Ver planos", on_click=_go_plans),
+    ]
+    dialog.actions_alignment = ft.MainAxisAlignment.END
+    _show_dialog_compat(page, dialog)
+
+
+def _show_confirm_dialog(
+    page: Optional[ft.Page],
+    title: str,
+    message: str,
+    on_confirm: Callable[[], None],
+    confirm_label: str = "Confirmar",
+):
+    if not page:
+        return
+    dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text(str(title or "Confirmacao")),
+        content=ft.Text(str(message or "")),
+    )
+
+    def _cancel(_):
+        _close_dialog_compat(page, dialog)
+
+    def _confirm(_):
+        _close_dialog_compat(page, dialog)
+        try:
+            on_confirm()
+        except Exception as ex:
+            log_exception(ex, "main._show_confirm_dialog.on_confirm")
+
+    dialog.actions = [
+        ft.TextButton("Cancelar", on_click=_cancel),
+        ft.ElevatedButton(confirm_label, on_click=_confirm),
+    ]
+    dialog.actions_alignment = ft.MainAxisAlignment.END
+    _show_dialog_compat(page, dialog)
+
+
+def _show_api_issue_dialog(page: Optional[ft.Page], navigate, kind: str = "generic"):
+    if not page:
+        return
+    mode = str(kind or "generic").strip().lower()
+    if mode == "quota":
+        _show_quota_dialog(page, navigate)
+        return
+    if mode == "auth":
+        title = "API key invalida"
+        message = (
+            "Nao foi possivel autenticar na IA com a chave atual. "
+            "Revise a API key em Configuracoes."
+        )
+    else:
+        title = "Erro na IA"
+        message = "Ocorreu um erro ao usar a IA. Verifique as configuracoes e tente novamente."
+
+    dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text(title),
+        content=ft.Text(message),
+    )
+
+    def _go_settings(_):
+        _close_dialog_compat(page, dialog)
+        navigate("/settings")
+
+    dialog.actions = [
+        ft.TextButton("Fechar", on_click=lambda _: _close_dialog_compat(page, dialog)),
+        ft.ElevatedButton("Abrir configuracoes", on_click=_go_settings),
+    ]
+    dialog.actions_alignment = ft.MainAxisAlignment.END
+    _show_dialog_compat(page, dialog)
+
+
+def _set_feedback_text(control: ft.Text, message: str, tone: str = "info"):
+    palette = {
+        "info": CORES.get("texto_sec", "#6B7280"),
+        "success": CORES.get("sucesso", "#10B981"),
+        "warning": CORES.get("warning", "#F59E0B"),
+        "error": CORES.get("erro", "#EF4444"),
+    }
+    normalized = _fix_mojibake_text(str(message or ""))
+    control.value = normalized
+    control.color = palette.get(tone, palette["info"])
+    host = getattr(control, "_banner_container", None)
+    if host is not None:
+        try:
+            host.visible = bool(str(normalized).strip())
+        except Exception:
+            pass
+
+
+def _wrap_study_content(content: ft.Control, dark: bool):
+    return ft.Container(
+        expand=True,
+        bgcolor=_color("fundo", dark),
+        padding=12,
+        alignment=ft.Alignment(0, -1),
+        content=content,
+    )
+
+
+def _status_banner(control: ft.Text, dark: bool):
+    box = ft.Container(
+        visible=bool(str(getattr(control, "value", "") or "").strip()),
+        bgcolor=ft.Colors.with_opacity(0.06, _color("texto", dark)),
+        border_radius=10,
+        border=ft.border.all(1, _soft_border(dark, 0.10)),
+        padding=10,
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.INFO_OUTLINE, size=16, color=_color("texto_sec", dark)),
+                ft.Container(expand=True, content=control),
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+    )
+    try:
+        setattr(control, "_banner_container", box)
+    except Exception:
+        pass
+    return box
+
+
+def _is_ai_processing(state: Optional[dict]) -> bool:
+    try:
+        return int((state or {}).get("ai_busy_count") or 0) > 0
+    except Exception:
+        return False
+
+
+def _sync_ai_indicator_controls(state: Optional[dict]) -> None:
+    if not isinstance(state, dict):
+        return
+    busy_count = max(0, int(state.get("ai_busy_count") or 0))
+    busy = bool(busy_count > 0)
+    message = str(state.get("ai_busy_message") or "").strip() or "Processando com IA..."
+    box = state.get("_ai_busy_box_ctl")
+    text = state.get("_ai_busy_text_ctl")
+    bar = state.get("_ai_busy_bar_ctl")
+    try:
+        if text is not None:
+            text.value = message
+        if bar is not None:
+            bar.visible = busy
+        if box is not None:
+            box.visible = busy
+    except Exception:
+        pass
+
+
+def _begin_ai_processing(state: Optional[dict], page: Optional[ft.Page], message: str = "") -> None:
+    if not isinstance(state, dict):
+        return
+    count = max(0, int(state.get("ai_busy_count") or 0)) + 1
+    state["ai_busy_count"] = count
+    if str(message or "").strip():
+        state["ai_busy_message"] = str(message).strip()
+    elif not str(state.get("ai_busy_message") or "").strip():
+        state["ai_busy_message"] = "Processando com IA..."
+    _sync_ai_indicator_controls(state)
+    if page:
+        try:
+            page.update()
+        except Exception:
+            pass
+
+
+def _end_ai_processing(state: Optional[dict], page: Optional[ft.Page]) -> None:
+    if not isinstance(state, dict):
+        return
+    count = max(0, int(state.get("ai_busy_count") or 0) - 1)
+    state["ai_busy_count"] = count
+    if count == 0:
+        state["ai_busy_message"] = ""
+    _sync_ai_indicator_controls(state)
+    if count == 0 and bool(state.get("pending_theme_refresh")):
+        state["pending_theme_refresh"] = False
+        refresh_cb = state.get("_theme_refresh_cb")
+        if callable(refresh_cb):
+            try:
+                refresh_cb(None)
+            except TypeError:
+                try:
+                    refresh_cb()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    if page:
+        try:
+            page.update()
+        except Exception:
+            pass
+
+
+def _schedule_ai_task(
+    page: Optional[ft.Page],
+    state: Optional[dict],
+    coro_fn: Callable[..., Any],
+    *args,
+    message: str = "Processando com IA...",
+    status_control: Optional[ft.Text] = None,
+) -> bool:
+    if not page:
+        return False
+    if _is_ai_processing(state):
+        if status_control is not None:
+            _set_feedback_text(status_control, "Aguarde: a IA ainda esta processando a solicitacao anterior.", "info")
+        else:
+            try:
+                ds_toast(page, "IA em processamento. Aguarde concluir.", tipo="info")
+            except Exception:
+                pass
+        try:
+            page.update()
+        except Exception:
+            pass
+        return False
+
+    _begin_ai_processing(state, page, message=message)
+    if status_control is not None and str(message or "").strip():
+        _set_feedback_text(status_control, str(message).strip(), "info")
+        try:
+            page.update()
+        except Exception:
+            pass
+
+    async def _runner():
+        try:
+            await coro_fn(*args)
+        finally:
+            _end_ai_processing(state, page)
+
+    try:
+        page.run_task(_runner)
+        return True
+    except Exception:
+        _end_ai_processing(state, page)
+        return False
+
+
+def _soft_border(dark: bool, alpha: float = 0.10):
+    return ft.Colors.with_opacity(alpha, _color("texto", dark))
+
+
+def _style_form_controls(control: ft.Control, dark: bool):
+    if control is None:
+        return
+    try:
+        if isinstance(control, ft.TextField):
+            control.filled = True
+            control.fill_color = ft.Colors.with_opacity(0.05, _color("texto", dark))
+            control.border_color = _soft_border(dark, 0.12)
+            control.focused_border_color = CORES["primaria"]
+            control.border_radius = 12
+            if getattr(control, "text_size", None) is None:
+                control.text_size = 15
+        elif isinstance(control, ft.Dropdown):
+            control.filled = True
+            control.fill_color = ft.Colors.with_opacity(0.05, _color("texto", dark))
+            control.border_color = _soft_border(dark, 0.12)
+            control.focused_border_color = CORES["primaria"]
+            control.border_radius = 12
+            if getattr(control, "text_size", None) is None:
+                control.text_size = 15
+        elif isinstance(control, ft.Switch):
+            control.active_color = CORES["primaria"]
+            control.inactive_track_color = _soft_border(dark, 0.20)
+            control.inactive_thumb_color = _soft_border(dark, 0.45)
+    except Exception:
+        pass
+
+    for child_attr in ("controls", "content", "leading", "title", "subtitle", "trailing"):
+        if not hasattr(control, child_attr):
+            continue
+        child = getattr(control, child_attr)
+        if child is None:
+            continue
+        if isinstance(child, list):
+            for item in child:
+                _style_form_controls(item, dark)
+        else:
+            _style_form_controls(child, dark)
+
+
+def _apply_global_theme(page: ft.Page):
+    page.theme = ft.Theme(
+        use_material3=True,
+        color_scheme_seed=CORES["primaria"],
+        card_bgcolor=CORES["card"],
+        scaffold_bgcolor=CORES["fundo"],
+        divider_color=ft.Colors.with_opacity(0.08, CORES["texto"]),
+    )
+    page.dark_theme = ft.Theme(
+        use_material3=True,
+        color_scheme_seed=CORES["texto_sec_escuro"],
+        card_bgcolor=CORES["card_escuro"],
+        scaffold_bgcolor=CORES["fundo_escuro"],
+        divider_color=ft.Colors.with_opacity(0.10, CORES["texto_escuro"]),
+    )
+
+
+def _logo_control(dark: bool):
+    logo_path = os.path.join("assets", "logo_quizvance.png")
+    if os.path.exists(logo_path):
+        return ft.Image(src=logo_path, width=220, height=220, fit="contain"), True
+    return ft.Text("Quiz Vance", size=32, weight=ft.FontWeight.BOLD, color=_color("texto", dark)), False
+
+def _logo_small(dark: bool):
+    logo_path = os.path.join("assets", "logo_quizvance.png")
+    if os.path.exists(logo_path):
+        return ft.Image(src=logo_path, width=110, height=110, fit="contain")
+    return ft.Text("Quiz Vance", size=18, weight=ft.FontWeight.BOLD, color=_color("texto", dark))
+
+
+def _normalize_uploaded_file_path(file_path: str) -> str:
+    raw = str(file_path or "").strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith("file://"):
+        try:
+            parsed = urlparse(raw)
+            uri_path = unquote(parsed.path or "")
+            # file:///C:/... em Windows chega com barra inicial.
+            if os.name == "nt" and len(uri_path) >= 3 and uri_path[0] == "/" and uri_path[2] == ":":
+                uri_path = uri_path[1:]
+            return uri_path or raw
+        except Exception:
+            return raw
+    return raw
+
 
 def _read_uploaded_study_text(file_path: str) -> str:
     normalized_path = _normalize_uploaded_file_path(file_path)
@@ -714,7 +1332,9 @@ def _build_compact_nav(current_route: str, navigate, dark: bool):
 def _build_home_body(state: dict, navigate, dark: bool):
     usuario = state.get("usuario") or {}
     db = state.get("db")
-    nome = usuario.get("nome", "Usuario")    # --- Dados do progresso ---
+    nome = usuario.get("nome", "Usuario")
+
+    # ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Dados do progresso ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     progresso = {
         "meta_questoes": int(usuario.get("meta_questoes_diaria") or 20),
         "questoes_respondidas": 0,
@@ -749,7 +1369,9 @@ def _build_home_body(state: dict, navigate, dark: bool):
     acertos = int(progresso.get("acertos") or 0)
     pct_acerto = round((acertos / respondidas * 100) if respondidas > 0 else 0)
     revisoes_pend = int(progresso.get("revisoes_pendentes") or 0)
-    progresso_meta = min(1.0, respondidas / max(meta, 1))    # --- Saudacao ---
+    progresso_meta = min(1.0, respondidas / max(meta, 1))
+
+    # ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ SaudaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     hora = datetime.datetime.now().hour
     if hora < 12:
         saudacao_label = "Bom dia"
@@ -774,7 +1396,9 @@ def _build_home_body(state: dict, navigate, dark: bool):
             ),
         ],
         spacing=DS.SP_4,
-    )    # --- Stat cards ---
+    )
+
+    # ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Stat cards ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     stat_cards = [
         ds_stat_card(
             col={"xs": 6, "sm": 6, "md": 3},
@@ -819,7 +1443,9 @@ def _build_home_body(state: dict, navigate, dark: bool):
             dark=dark,
             icon_color=DS.WARNING,
         ),
-    ]    # --- Meta diaria com barra de progresso ---
+    ]
+
+    # ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Meta diÃƒÆ’Ã‚Â¡ria com barra de progresso ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     meta_card = ds_card(
         dark=dark,
         content=ft.Column(
@@ -865,7 +1491,9 @@ def _build_home_body(state: dict, navigate, dark: bool):
             ],
             spacing=DS.SP_12,
         ),
-    )    # --- Card: Estudar um tema ---
+    )
+
+    # ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Card: Estudar um tema (stub para Commit 8) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
     # Campo de tema inline - funcional (Commit 8)
     tema_input = ft.TextField(
         hint_text="Ex.: Direito Constitucional, Calculo I",
@@ -1493,14 +2121,31 @@ def _build_library_body(state, navigate, dark: bool):
                             db.salvar_resumo_por_hash(int(user["id"]), source_hash, file_name, summary)
                         except Exception as ex:
                             log_exception(ex, "_generate_package_async.save_summary_cache")
+                # Rotação: seleciona chunks menos vistos; monta lista de perguntas a evitar
+                _uid = int(user["id"]) if user.get("id") else None
+                _chunks_rot = _pick_rotation_chunks(db, _uid, chunks, file_name, qtd_chunks=8) if _QUIZ_ROTATION_ENABLED else chunks
+                _evitar = _build_evitar_block(db, _uid, file_name, limite=20) if _QUIZ_ROTATION_ENABLED else []
                 lote_quiz = await asyncio.to_thread(
                     service.generate_quiz_batch,
-                    chunks,
+                    _chunks_rot,
                     file_name,
                     "Intermediario",
                     3,
                     1,
+                    _evitar,
                 )
+                # Valida estrutura e remove duplicatas antes de entregar para a UI
+                lote_quiz_filtrado = []
+                for _q in (lote_quiz or []):
+                    if _QUIZ_ROTATION_ENABLED and not _validate_question(_q):
+                        continue
+                    if _QUIZ_ROTATION_ENABLED:
+                        _q = _sanitize_question(_q)
+                    lote_quiz_filtrado.append(_q)
+                if _QUIZ_ROTATION_ENABLED and _uid:
+                    lote_quiz_filtrado = _filter_new_questions(db, _uid, lote_quiz_filtrado, file_name)
+                    _register_seen(db, _uid, lote_quiz_filtrado, file_name)
+                lote_quiz = lote_quiz_filtrado
                 for q in lote_quiz or []:
                     questoes.append(
                         _sanitize_payload_texts({
@@ -1837,7 +2482,7 @@ def _build_library_body(state, navigate, dark: bool):
 
 
 def _build_splash(page: ft.Page, navigate, dark: bool):
-    # Splash usa fundo escuro fixo para realcar a logo
+    # Splash usa fundo escuro fixo para realÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ar a logo
     splash_bg = "#1c1c1c"
     logo, has_image = _logo_control(True)
 
@@ -6705,7 +7350,7 @@ def main(page: ft.Page):
                 if route not in _no_cache_routes:
                     cache[route] = view
 
-            # Evita piscadas: so troca se for outra instancia
+            # Evita piscadas: sÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â³ troca se for outra instÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ncia
             if page.views and page.views[-1] is view:
                 log_event("route_cached", route)
                 return
@@ -6774,8 +7419,7 @@ def main(page: ft.Page):
     # 1) mostra splash
     # 2) inicia runtime em background durante o splash
     # 3) navega para /login com runtime ja adiantado
-    # NOTA: _on_android usa nome diferente para nao sobrescrever a funcao is_android() importada
-    _on_android = bool(os.getenv("ANDROID_DATA"))
+    is_android = bool(os.getenv("ANDROID_DATA"))
     _start_runtime_init()
     splash_view, logo_box, tagline = _build_splash(page, navigate, state["tema_escuro"])
     page.views[:] = [splash_view]
@@ -6783,7 +7427,7 @@ def main(page: ft.Page):
 
     async def run_splash():
         # Android: splash curta e estatica para reduzir risco de black screen.
-        if _on_android:
+        if is_android:
             # Keep Android splash static and visible (no fade), then navigate.
             logo_box.opacity = 1
             logo_box.width = 200

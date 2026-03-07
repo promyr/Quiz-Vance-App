@@ -190,8 +190,8 @@ def build_library_body(state: dict, navigate, dark: bool) -> ft.Control:
                         ft.Container(col={"xs": 12, "md": 4}, content=ft.TextButton("Plano", icon=ft.Icons.CALENDAR_MONTH_OUTLINED, on_click=lambda _, item=p: _start_plan_from_package(item))),
                         ft.Container(col={"xs": 12, "md": 12}, alignment=ft.Alignment(1, 0),
                                      content=ft.PopupMenuButton(icon=ft.Icons.MORE_HORIZ, tooltip="Mais acoes", items=[
-                                         ft.PopupMenuItem(text="Exportar .md", icon=ft.Icons.DOWNLOAD_OUTLINED, on_click=lambda _, item=p: _export_package_markdown(item)),
-                                         ft.PopupMenuItem(text="Exportar .pdf", icon=ft.Icons.PICTURE_AS_PDF, on_click=lambda _, item=p: _export_package_pdf(item)),
+                                         ft.PopupMenuItem(content=ft.Text("Exportar .md"), icon=ft.Icons.DOWNLOAD_OUTLINED, on_click=lambda _, item=p: _export_package_markdown(item)),
+                                         ft.PopupMenuItem(content=ft.Text("Exportar .pdf"), icon=ft.Icons.PICTURE_AS_PDF, on_click=lambda _, item=p: _export_package_pdf(item)),
                                      ])),
                     ], run_spacing=6, spacing=6),
                 ], spacing=6),
