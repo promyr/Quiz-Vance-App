@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """View de configuraÃ§Ãµes â€” extraÃ­da do main_v2.py."""
 
 from __future__ import annotations
@@ -278,7 +278,18 @@ def build_settings_body(state: dict, navigate, dark: bool) -> ft.Control:
                 if int(b_uid or 0) <= 0:
                     return
                 try:
-                    await asyncio.to_thread(backend_ref.upsert_user_settings, int(b_uid), provider_value, model_value, api_value, bool(economia_mode_switch.value), bool(telemetry_opt_in_switch.value))
+                    await asyncio.to_thread(
+                        backend_ref.upsert_user_settings,
+                        int(b_uid),
+                        provider_value,
+                        model_value,
+                        api_value,
+                        bool(economia_mode_switch.value),
+                        bool(telemetry_opt_in_switch.value),
+                        api_key_gemini=str(api_keys.get("gemini") or "").strip() or None,
+                        api_key_openai=str(api_keys.get("openai") or "").strip() or None,
+                        api_key_groq=str(api_keys.get("groq") or "").strip() or None,
+                    )
                 except Exception as ex_sync:
                     log_exception(ex_sync, "settings_view.save.sync_remote")
 

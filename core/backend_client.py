@@ -170,18 +170,28 @@ class BackendClient:
         api_key: Optional[str],
         economia_mode: bool,
         telemetry_opt_in: bool,
+        api_key_gemini: Optional[str] = None,
+        api_key_openai: Optional[str] = None,
+        api_key_groq: Optional[str] = None,
     ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "user_id": int(user_id),
+            "provider": str(provider or "gemini").strip().lower(),
+            "model": str(model or "gemini-2.5-flash").strip(),
+            "api_key": (str(api_key).strip() if api_key is not None else None),
+            "economia_mode": bool(economia_mode),
+            "telemetry_opt_in": bool(telemetry_opt_in),
+        }
+        if api_key_gemini is not None:
+            payload["api_key_gemini"] = str(api_key_gemini).strip() or None
+        if api_key_openai is not None:
+            payload["api_key_openai"] = str(api_key_openai).strip() or None
+        if api_key_groq is not None:
+            payload["api_key_groq"] = str(api_key_groq).strip() or None
         return self._request(
             "POST",
             "/internal/user-settings",
-            {
-                "user_id": int(user_id),
-                "provider": str(provider or "gemini").strip().lower(),
-                "model": str(model or "gemini-2.5-flash").strip(),
-                "api_key": (str(api_key).strip() if api_key is not None else None),
-                "economia_mode": bool(economia_mode),
-                "telemetry_opt_in": bool(telemetry_opt_in),
-            },
+            payload,
         )
 
     def get_plan(self, user_id: int) -> Dict[str, Any]:

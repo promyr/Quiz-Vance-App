@@ -78,6 +78,9 @@ class UserSettingsOut(BaseModel):
     provider: str = "gemini"
     model: str = "gemini-2.5-flash"
     api_key: str | None = None
+    api_key_gemini: str | None = None
+    api_key_openai: str | None = None
+    api_key_groq: str | None = None
     economia_mode: bool = False
     telemetry_opt_in: bool = False
 
@@ -87,6 +90,9 @@ class UpsertUserSettingsIn(BaseModel):
     provider: str = "gemini"
     model: str = "gemini-2.5-flash"
     api_key: str | None = None
+    api_key_gemini: str | None = None
+    api_key_openai: str | None = None
+    api_key_groq: str | None = None
     economia_mode: bool = False
     telemetry_opt_in: bool = False
 

@@ -808,6 +808,9 @@ def get_user_settings(
         provider=str(row.provider or "gemini"),
         model=str(row.model or "gemini-2.5-flash"),
         api_key=str(row.api_key) if row.api_key else None,
+        api_key_gemini=str(row.api_key_gemini) if row.api_key_gemini else None,
+        api_key_openai=str(row.api_key_openai) if row.api_key_openai else None,
+        api_key_groq=str(row.api_key_groq) if row.api_key_groq else None,
         economia_mode=bool(int(row.economia_mode or 0)),
         telemetry_opt_in=bool(int(row.telemetry_opt_in or 0)),
     )
@@ -829,6 +832,12 @@ def upsert_user_settings(
     row.provider = str(payload.provider or "gemini").strip().lower() or "gemini"
     row.model = str(payload.model or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
     row.api_key = str(payload.api_key).strip() if payload.api_key is not None else None
+    if payload.api_key_gemini is not None:
+        row.api_key_gemini = str(payload.api_key_gemini).strip() or None
+    if payload.api_key_openai is not None:
+        row.api_key_openai = str(payload.api_key_openai).strip() or None
+    if payload.api_key_groq is not None:
+        row.api_key_groq = str(payload.api_key_groq).strip() or None
     row.economia_mode = 1 if bool(payload.economia_mode) else 0
     row.telemetry_opt_in = 1 if bool(payload.telemetry_opt_in) else 0
     row.updated_at = datetime.now(timezone.utc)
@@ -839,6 +848,9 @@ def upsert_user_settings(
         provider=str(row.provider or "gemini"),
         model=str(row.model or "gemini-2.5-flash"),
         api_key=str(row.api_key) if row.api_key else None,
+        api_key_gemini=str(row.api_key_gemini) if row.api_key_gemini else None,
+        api_key_openai=str(row.api_key_openai) if row.api_key_openai else None,
+        api_key_groq=str(row.api_key_groq) if row.api_key_groq else None,
         economia_mode=bool(int(row.economia_mode or 0)),
         telemetry_opt_in=bool(int(row.telemetry_opt_in or 0)),
     )

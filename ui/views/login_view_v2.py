@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 LoginView - versao estavel para Flet 0.80.x
 """
@@ -433,6 +433,10 @@ class LoginView(ft.View):
                 api_key = remote_cfg.get("api_key", usuario.get("api_key"))
                 economia_mode = bool(remote_cfg.get("economia_mode"))
                 telemetry_opt_in = bool(remote_cfg.get("telemetry_opt_in"))
+                # Restore per-provider keys from backend
+                remote_key_gemini = remote_cfg.get("api_key_gemini")
+                remote_key_openai = remote_cfg.get("api_key_openai")
+                remote_key_groq = remote_cfg.get("api_key_groq")
                 ok_cfg = await asyncio.to_thread(
                     self.db.sync_ai_preferences,
                     int(usuario.get("id") or 0),
@@ -452,6 +456,29 @@ class LoginView(ft.View):
                     usuario[f"api_key_{provider_norm}"] = api_key
                     usuario["economia_mode"] = 1 if economia_mode else 0
                     usuario["telemetry_opt_in"] = 1 if telemetry_opt_in else 0
+                # Sync per-provider keys into local DB and state
+                per_provider_keys = {}
+                if remote_key_gemini:
+                    per_provider_keys["gemini"] = str(remote_key_gemini).strip()
+                if remote_key_openai:
+                    per_provider_keys["openai"] = str(remote_key_openai).strip()
+                if remote_key_groq:
+                    per_provider_keys["groq"] = str(remote_key_groq).strip()
+                if per_provider_keys:
+                    try:
+                        await asyncio.to_thread(
+                            self.db.atualizar_api_keys,
+                            int(usuario.get("id") or 0),
+                            per_provider_keys,
+                            provider_norm if ok_cfg else None,
+                        )
+                        for p, k in per_provider_keys.items():
+                            usuario[f"api_key_{p}"] = k
+                        # Update active key if missing
+                        if not usuario.get("api_key") and per_provider_keys.get(provider_norm if ok_cfg else "gemini"):
+                            usuario["api_key"] = per_provider_keys.get(provider_norm if ok_cfg else "gemini")
+                    except Exception as ex_keys:
+                        log_exception(ex_keys, "login_view._acao_login_async.sync_per_provider_keys")
             except Exception as ex_cfg:
                 log_exception(ex_cfg, "login_view._acao_login_async.sync_remote_settings")
             try:

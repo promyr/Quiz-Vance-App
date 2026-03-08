@@ -5950,6 +5950,9 @@ def _build_settings_body(state, navigate, dark: bool):
                         api_value,
                         bool(economia_mode_switch.value),
                         bool(telemetry_opt_in_switch.value),
+                        api_key_gemini=str(api_keys.get("gemini") or "").strip() or None,
+                        api_key_openai=str(api_keys.get("openai") or "").strip() or None,
+                        api_key_groq=str(api_keys.get("groq") or "").strip() or None,
                     )
                 except Exception as ex_sync:
                     log_exception(ex_sync, "settings_save.sync_remote")
