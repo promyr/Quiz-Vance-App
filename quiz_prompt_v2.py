@@ -1,35 +1,170 @@
 # -*- coding: utf-8 -*-
 """
 quiz_prompt_v2.py
-Novo prompt de geração de questões para o QuizVance.
 
-COMO USAR:
-  Substitua o método `_build_quiz_prompt` (ou equivalente) dentro de
-  core/ai_service_v2.py pelo conteúdo abaixo, adaptando os parâmetros
-  conforme a assinatura já existente no seu AIService.
-
-  O método `generate_quiz_batch` deve chamar `_build_quiz_prompt` para
-  montar a mensagem enviada à API. Nada mais muda na camada de chamada.
+Prompt and validation helpers for quiz generation.
+This module is consumed by:
+- core/ai_service_v2.py (prompt builder)
+- main_v2.py (post-parse validation/sanitization in some flows)
 """
 
+from __future__ import annotations
+
 import json
+import re
 import textwrap
-from typing import Optional
+from typing import Any, Optional
 
 
-# ---------------------------------------------------------------------------
-# Mapa de dificuldade → instrução de profundidade
-# ---------------------------------------------------------------------------
-_NIVEL_INSTRUCAO = {
-    "facil":        "Nível FÁCIL: conceito central direto; distratores erram um detalhe concreto.",
-    "intermediario": "Nível INTERMEDIÁRIO: exija relação causa-efeito ou aplicação de conceito; distratores invertem a lógica.",
-    "dificil":      "Nível DIFÍCIL: questão-problema com raciocínio de múltiplas etapas; distratores são conclusões parcialmente corretas.",
+_MAX_PERGUNTA = 280
+_MAX_OPCAO = 90
+_MAX_EXPLIC = 190
+_MAX_SUBTEMA = 60
+_MAX_TRECHO = 6000
+_MIN_CHUNK = 300
+
+
+_NIVEL: dict[str, tuple[str, str]] = {
+    "iniciante": (
+        "INICIANTE",
+        "Conceito basico e direto; distratores simples erram um detalhe objetivo.",
+    ),
+    "facil": (
+        "FACIL",
+        "Conceito central direto; distratores erram um detalhe concreto.",
+    ),
+    "intermediario": (
+        "INTERMEDIARIO",
+        "Exija relacao causa-efeito ou aplicacao de conceito; distratores invertem a logica.",
+    ),
+    "dificil": (
+        "DIFICIL",
+        "Questao-problema com multiplas etapas; distratores sao parcialmente corretos.",
+    ),
+    "mestre": (
+        "MESTRE",
+        "Caso tecnico de alto nivel com interpretacoes plausiveis, sem distratores absurdos.",
+    ),
 }
 
-# Máximo de chars por campo (mantém compatibilidade com o parser da UI)
-_MAX_PERGUNTA  = 280
-_MAX_OPCAO     = 90
-_MAX_EXPLIC    = 190
+_NIVEL_ALIAS: dict[str, str] = {
+    "fácil": "facil",
+    "medio": "intermediario",
+    "médio": "intermediario",
+    "avancado": "dificil",
+    "avançado": "dificil",
+    "easy": "iniciante",
+    "beginner": "iniciante",
+}
+
+_REF_MATERIAL_RE = re.compile(
+    r"\b("
+    r"segundo o texto|conforme o trecho|de acordo com o texto|de acordo com o autor|"
+    r"no texto acima|no texto apresentado|com base no texto|com base no trecho|"
+    r"o autor afirma|o autor diz|leia o trecho"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_DECOREBA_RE = re.compile(
+    r"^(o que e\b|defina\b|conceitue\b|qual o nome\b|qual a definicao\b|quem foi\b)",
+    re.IGNORECASE,
+)
+
+_OPTION_PREFIX_RE = re.compile(r"^(?:[A-Ea-e][\)\.\:\-]\s*|\d+[\)\.]\s*)")
+_SIGLA_RE = re.compile(r"\b[A-Z]{2,8}(?:/\d{2,4})?\b")
+_PROPER_RE = re.compile(r"\b(?:[A-Z][a-z]{3,}(?:\s+[A-Z][a-z]{3,}){0,2})\b")
+
+
+def _build_system_prompt() -> str:
+    return (
+        "Voce e um elaborador senior de questoes para concursos brasileiros de alto nivel. "
+        "Retorne apenas JSON valido, sem markdown e sem texto fora do JSON."
+    )
+
+
+def _normalize_level(dificuldade: str) -> tuple[str, str]:
+    key = str(dificuldade or "").strip().lower()
+    key = _NIVEL_ALIAS.get(key, key)
+    if key not in _NIVEL:
+        key = "intermediario"
+    return _NIVEL[key]
+
+
+def _prepare_trecho(chunks: list[str], tema: str, max_chars: int = _MAX_TRECHO) -> str:
+    if not chunks:
+        return f"Tema: {tema}. Elabore questoes tecnicas sobre este assunto."
+
+    cleaned = [str(c).strip() for c in chunks if str(c).strip()]
+    if not cleaned:
+        return f"Tema: {tema}."
+
+    safe_max = max(800, int(max_chars or _MAX_TRECHO))
+    chars_per_chunk = max(_MIN_CHUNK, safe_max // max(1, len(cleaned)))
+    partes: list[str] = []
+
+    for chunk in cleaned:
+        if len(chunk) <= chars_per_chunk:
+            partes.append(chunk)
+            continue
+        cut = chunk[:chars_per_chunk]
+        split_at = max(cut.rfind(". "), cut.rfind("; "), cut.rfind(": "))
+        if split_at > int(chars_per_chunk * 0.55):
+            cut = cut[: split_at + 1]
+        partes.append(cut)
+
+    trecho = "\n\n".join(partes)
+    if len(trecho) <= safe_max:
+        return trecho
+
+    trecho = trecho[:safe_max]
+    split_at = max(trecho.rfind(". "), trecho.rfind("; "), trecho.rfind(": "))
+    if split_at > int(safe_max * 0.75):
+        trecho = trecho[: split_at + 1]
+    return trecho + "\n[...material truncado para caber no contexto...]"
+
+
+def _extract_subtema_anchors(chunks: list[str], max_items: int = 10) -> list[str]:
+    stopwords = {
+        "de", "da", "do", "das", "dos", "a", "o", "e", "em", "no", "na", "que", "para", "com",
+        "os", "as", "se", "por", "ao", "ou", "uma", "um", "mais", "quando", "como", "mas",
+        "isso", "esta", "este", "essa", "esse", "ser", "ter", "foi", "nao", "ja",
+    }
+    seen: set[str] = set()
+    out: list[str] = []
+
+    for raw in chunks or []:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        anchor = ""
+
+        m = _SIGLA_RE.search(text[:220])
+        if m:
+            anchor = m.group(0).strip()
+
+        if not anchor:
+            m2 = _PROPER_RE.search(text[:300])
+            if m2:
+                anchor = m2.group(0).strip()
+
+        if not anchor:
+            tokens = []
+            for tok in re.findall(r"[A-Za-z0-9_/-]+", text):
+                low = tok.lower()
+                if len(low) >= 4 and low not in stopwords:
+                    tokens.append(tok)
+                if len(tokens) >= 5:
+                    break
+            anchor = " ".join(tokens).strip()
+
+        if anchor and anchor not in seen:
+            seen.add(anchor)
+            out.append(anchor[:_MAX_SUBTEMA])
+        if len(out) >= max(1, int(max_items or 1)):
+            break
+
+    return out
 
 
 def _build_quiz_prompt(
@@ -40,108 +175,147 @@ def _build_quiz_prompt(
     pagina: int = 1,
     evitar: Optional[list[str]] = None,
 ) -> str:
-    """
-    Monta o prompt completo para geração de questões objetivas.
+    try:
+        quantidade = max(1, min(10, int(qtd or 1)))
+    except Exception:
+        quantidade = 1
+    try:
+        pagina_int = max(1, int(pagina or 1))
+    except Exception:
+        pagina_int = 1
 
-    Parâmetros
-    ----------
-    chunks      : linhas/parágrafos do material do usuário
-    tema        : título/assunto da sessão (ex.: "Direito Constitucional")
-    dificuldade : "facil" | "intermediario" | "dificil"
-    qtd         : número de questões a gerar (tipicamente 3–10)
-    pagina      : índice de lote (evita repetição entre chamadas consecutivas)
-    evitar      : lista de enunciados já gerados nesta sessão
+    nivel_label, nivel_instrucao = _normalize_level(dificuldade)
+    trecho = _prepare_trecho(list(chunks or []), str(tema or ""), _MAX_TRECHO)
+    subtemas = _extract_subtema_anchors(list(chunks or []), max_items=min(12, max(4, quantidade * 2)))
 
-    Retorna
-    -------
-    str : prompt pronto para enviar como `user` message à API
-    """
-    nivel_str = _NIVEL_INSTRUCAO.get(
-        str(dificuldade).lower(),
-        _NIVEL_INSTRUCAO["intermediario"],
-    )
-
-    # Prepara o trecho: une chunks, limita a ~6 000 chars para não explodir o contexto
-    trecho_raw = "\n".join(str(c).strip() for c in (chunks or []) if str(c).strip())
-    trecho = trecho_raw[:6000].strip()
-    if not trecho:
-        trecho = f"Tema: {tema}. Elabore questões com base em conhecimento técnico consolidado sobre este assunto."
-
-    # Histórico de perguntas a evitar
     historico_block = ""
     if evitar:
-        itens = "\n".join(f"- {e}" for e in evitar[:20])
-        historico_block = f"\nHISTÓRICO (não recrie estas perguntas):\n{itens}\n"
+        itens = []
+        for q in evitar[:20]:
+            txt = " ".join(str(q or "").split()).strip()
+            if txt:
+                itens.append(f"- {txt[:160]}")
+        if itens:
+            historico_block = "\nHISTORICO - nao recrie nem parafraseie estas perguntas:\n" + "\n".join(itens) + "\n"
 
-    # Instruções de variação do correta_index para evitar viés posicional
-    indices_esperados = ", ".join(str(i % 4) for i in range(qtd))
+    subtema_block = ""
+    if subtemas:
+        subtema_block = "\nSUBTEMAS DISPONIVEIS (priorize variedade):\n" + "\n".join(f"- {s}" for s in subtemas) + "\n"
 
-    prompt = textwrap.dedent(f"""
-    Você é um elaborador sênior de questões para concursos públicos brasileiros de alto nível (CESPE, FCC, VUNESP).
+    offset = (pagina_int - 1) % 4
+    indices_seq = ", ".join(str((offset + i) % 4) for i in range(quantidade))
+    sample_index = (offset + 2) % 4
 
-    MATERIAL DE ESTUDO:
-    \"\"\"
-    {trecho}
-    \"\"\"
+    prompt = textwrap.dedent(
+        f"""
+        MATERIAL DE ESTUDO (LOTE {pagina_int}):
+        {trecho}
 
-    TEMA DA SESSÃO: {tema}
-    {nivel_str}
-    LOTE {pagina} — gere EXATAMENTE {qtd} questão(ões) novas.
-    {historico_block}
-    REGRAS OBRIGATÓRIAS DE CONTEÚDO:
-    1. Use exclusivamente o conteúdo do material acima. Nunca invente fatos externos.
-    2. Perguntas autônomas: proibido usar "segundo o texto", "conforme o trecho" ou similar.
-    3. Proibido decoreba ("O que é X?", "Qual o nome de..."). Exija raciocínio, comparação ou aplicação.
-    4. Ignore metadados do material (autor, ISBN, editora, edição, datas de publicação, sumário).
-    5. Cada distrator deve usar um conceito real do material, mas aplicado no contexto errado.
-    6. Os valores de "correta_index" ao longo das {qtd} questões devem seguir esta sequência sugerida: [{indices_esperados}] — adapte se necessário, mas não repita o mesmo índice em todas.
+        TEMA: {tema}
+        NIVEL: {nivel_label}
+        Gere EXATAMENTE {quantidade} questao(oes) novas.
+        {subtema_block}{historico_block}
+        REGRAS OBRIGATORIAS:
+        1. Use somente o material acima. Nunca invente fatos externos.
+        2. Perguntas autonomas: proibido usar "segundo o texto", "conforme o trecho" ou similar.
+        3. Proibido decoreba ("O que e X?"). Exija raciocinio, comparacao ou aplicacao.
+        4. Ignore metadados (autor, ISBN, editora, edicao, datas, sumario, codigos).
+        5. Distratores plausiveis: conceito real do material, mas aplicado em contexto errado.
+        6. Varie subtemas entre questoes; evite concentrar tudo no mesmo ponto.
+        7. Varie correta_index conforme sequencia sugerida: [{indices_seq}].
+        8. Se nao houver base suficiente, retorne [].
 
-    REGRAS DE FORMATO (descumprir = questão descartada pelo parser):
-    - "pergunta"   → máx {_MAX_PERGUNTA} caracteres, enunciado técnico e direto
-    - "opcoes"     → lista com EXATAMENTE 4 itens; máx {_MAX_OPCAO} chars cada; SEM prefixos "A)", "B)" etc.
-    - "correta_index" → inteiro 0–3 indicando qual opção em "opcoes" é a correta
-    - "explicacao" → máx {_MAX_EXPLIC} chars; cite o conceito-chave que torna a alternativa correta
+        INSTRUCAO DE NIVEL:
+        {nivel_instrucao}
 
-    SAÍDA — JSON puro, sem markdown, sem texto antes ou depois:
-    [
-      {{
-        "pergunta": "Enunciado técnico",
-        "opcoes": ["Opção correta", "Distrator 1", "Distrator 2", "Distrator 3"],
-        "correta_index": 0,
-        "explicacao": "Razão objetiva da resposta correta."
-      }}
-    ]
-    """).strip()
+        LIMITES DE FORMATO:
+        - pergunta: max {_MAX_PERGUNTA} chars
+        - subtema: max {_MAX_SUBTEMA} chars
+        - opcoes: lista com EXATAMENTE 4 itens, max {_MAX_OPCAO} chars cada, sem prefixos "A)", "1."
+        - correta_index: inteiro 0-3
+        - explicacao: max {_MAX_EXPLIC} chars
 
+        Retorne APENAS JSON valido, sem markdown e sem texto adicional:
+        [
+          {{
+            "pergunta": "Enunciado tecnico e autonomo",
+            "subtema": "Conceito-chave",
+            "opcoes": ["Opcao correta", "Distrator 1", "Distrator 2", "Distrator 3"],
+            "correta_index": {sample_index},
+            "explicacao": "Razao objetiva da resposta correta."
+          }}
+        ]
+        """
+    ).strip()
     return prompt
 
 
-# ---------------------------------------------------------------------------
-# Validador pós-parse: checa integridade de cada questão antes de retornar
-# para a UI. Use no método generate_quiz_batch logo após o json.loads().
-# ---------------------------------------------------------------------------
+def _try_extract_json_list(raw: str) -> list[dict]:
+    if not raw:
+        return []
+    text = str(raw).strip().replace("```json", "").replace("```", "")
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [p for p in parsed if isinstance(p, dict)]
+        if isinstance(parsed, dict):
+            return [parsed]
+    except Exception:
+        pass
+
+    m = re.search(r"\[[\s\S]*\]", text)
+    if m:
+        try:
+            parsed = json.loads(m.group(0))
+            if isinstance(parsed, list):
+                return [p for p in parsed if isinstance(p, dict)]
+        except Exception:
+            pass
+
+    out = []
+    for chunk in re.findall(r"\{[\s\S]*?\}", text):
+        try:
+            parsed = json.loads(chunk)
+            if isinstance(parsed, dict):
+                out.append(parsed)
+        except Exception:
+            continue
+    return out
+
 
 def validate_question(q: dict) -> bool:
-    """
-    Retorna True se a questão está íntegra o suficiente para exibição.
-    Questões inválidas devem ser descartadas silenciosamente (não crashar).
-    """
     try:
-        pergunta = str(q.get("pergunta") or "").strip()
-        opcoes   = q.get("opcoes") or []
-        cidx     = q.get("correta_index")
-        explicac = str(q.get("explicacao") or "").strip()
-
-        if not pergunta or len(pergunta) > _MAX_PERGUNTA + 40:  # tolera 40 chars extra
+        if not isinstance(q, dict):
             return False
+        pergunta = str(q.get("pergunta") or "").strip()
+        if not pergunta or len(pergunta) > (_MAX_PERGUNTA + 40):
+            return False
+        if _REF_MATERIAL_RE.search(pergunta):
+            return False
+        if _DECOREBA_RE.match(pergunta):
+            return False
+
+        opcoes = q.get("opcoes") or []
         if not isinstance(opcoes, list) or len(opcoes) != 4:
             return False
-        if any(len(str(o)) > _MAX_OPCAO + 20 for o in opcoes):  # tolera 20 chars extra
+
+        normalized_options: list[str] = []
+        for raw in opcoes[:4]:
+            text = _OPTION_PREFIX_RE.sub("", str(raw or "")).strip()
+            if not text:
+                return False
+            if len(text) > (_MAX_OPCAO + 20):
+                return False
+            normalized_options.append(text.lower())
+        if len(set(normalized_options)) != 4:
             return False
-        if not isinstance(cidx, int) or not (0 <= cidx <= 3):
+
+        try:
+            cidx = int(str(q.get("correta_index")).strip())
+        except Exception:
             return False
-        # Garante que a opção correta não está em branco
-        if not str(opcoes[cidx]).strip():
+        if cidx < 0 or cidx >= 4:
             return False
         return True
     except Exception:
@@ -149,34 +323,42 @@ def validate_question(q: dict) -> bool:
 
 
 def sanitize_question(q: dict) -> dict:
-    """
-    Trunca campos que excedem os limites sem descartar a questão.
-    Chame após validate_question retornar True.
-    """
-    q["pergunta"]  = str(q.get("pergunta") or "")[:_MAX_PERGUNTA]
-    q["opcoes"]    = [str(o)[:_MAX_OPCAO] for o in (q.get("opcoes") or [])]
-    q["explicacao"] = str(q.get("explicacao") or "")[:_MAX_EXPLIC]
-    # Remove prefixos "A) B) C) D)" se o modelo insistir em colocá-los
-    import re
-    q["opcoes"] = [re.sub(r"^[A-Da-d][).]\s*", "", o).strip() for o in q["opcoes"]]
-    return q
+    if not isinstance(q, dict):
+        return {"pergunta": "", "subtema": "", "opcoes": [], "correta_index": 0, "explicacao": ""}
+
+    pergunta = str(q.get("pergunta") or "").strip()[:_MAX_PERGUNTA]
+    subtema = str(q.get("subtema") or "").strip()[:_MAX_SUBTEMA]
+    explicacao = str(q.get("explicacao") or "").strip()[:_MAX_EXPLIC]
+
+    raw_options = q.get("opcoes") or []
+    opcoes: list[str] = []
+    if isinstance(raw_options, list):
+        for raw in raw_options[:4]:
+            text = _OPTION_PREFIX_RE.sub("", str(raw or "")).strip()
+            opcoes.append(text[:_MAX_OPCAO])
+
+    try:
+        cidx = int(str(q.get("correta_index")).strip())
+    except Exception:
+        cidx = 0
+    if opcoes:
+        cidx = max(0, min(cidx, len(opcoes) - 1))
+    else:
+        cidx = 0
+
+    return {
+        "pergunta": pergunta,
+        "subtema": subtema,
+        "opcoes": opcoes,
+        "correta_index": cidx,
+        "explicacao": explicacao,
+    }
 
 
-# ---------------------------------------------------------------------------
-# Exemplo de integração no AIService (pseudocódigo):
-#
-#   from core.quiz_prompt_v2 import _build_quiz_prompt, validate_question, sanitize_question
-#
-#   def generate_quiz_batch(self, chunks, tema, dificuldade, qtd, pagina=1, evitar=None):
-#       prompt = _build_quiz_prompt(chunks, tema, dificuldade, qtd, pagina, evitar)
-#       raw = self.provider.complete(prompt)          # chamada à API
-#       try:
-#           items = json.loads(raw)
-#       except Exception:
-#           items = _try_extract_json_list(raw)       # fallback regex
-#       result = []
-#       for item in (items or []):
-#           if validate_question(item):
-#               result.append(sanitize_question(item))
-#       return result
-# ---------------------------------------------------------------------------
+def try_parse_questions(raw: str) -> list[dict]:
+    result: list[dict] = []
+    for item in _try_extract_json_list(raw):
+        sanitized = sanitize_question(item)
+        if validate_question(sanitized):
+            result.append(sanitized)
+    return result

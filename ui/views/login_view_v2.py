@@ -434,10 +434,19 @@ class LoginView(ft.View):
                 economia_mode = bool(remote_cfg.get("economia_mode"))
                 telemetry_opt_in = bool(remote_cfg.get("telemetry_opt_in"))
                 per_provider_keys = {
-                    "gemini": (str(remote_cfg.get("api_key_gemini") or "").strip() or None),
-                    "openai": (str(remote_cfg.get("api_key_openai") or "").strip() or None),
-                    "groq": (str(remote_cfg.get("api_key_groq") or "").strip() or None),
+                    "gemini": (str(usuario.get(provider_api_field("gemini")) or "").strip() or None),
+                    "openai": (str(usuario.get(provider_api_field("openai")) or "").strip() or None),
+                    "groq": (str(usuario.get(provider_api_field("groq")) or "").strip() or None),
                 }
+                remote_key_gemini = str(remote_cfg.get("api_key_gemini") or "").strip()
+                remote_key_openai = str(remote_cfg.get("api_key_openai") or "").strip()
+                remote_key_groq = str(remote_cfg.get("api_key_groq") or "").strip()
+                if remote_key_gemini:
+                    per_provider_keys["gemini"] = remote_key_gemini
+                if remote_key_openai:
+                    per_provider_keys["openai"] = remote_key_openai
+                if remote_key_groq:
+                    per_provider_keys["groq"] = remote_key_groq
                 api_key = per_provider_keys.get(provider)
                 if not api_key:
                     fallback_api = str(remote_cfg.get("api_key") or "").strip()

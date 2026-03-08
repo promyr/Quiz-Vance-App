@@ -32,6 +32,7 @@ from core.filter_taxonomy import get_quiz_filter_taxonomy
 from core.ui_async_guard import AsyncActionGuard
 from core.datetime_utils import _format_datetime_label, _format_exam_date_input, _parse_br_date
 from core.ui_route_theme import _normalize_route_path, _color
+from core.sync_utils import resolve_consumed_event_ids
 from core.ui_text_sanitizer import (
     _fix_mojibake_text,
     _sanitize_payload_texts,
@@ -165,39 +166,6 @@ _SETTINGS_SYNC_INTERVAL_S = max(8.0, _read_env_float("QUIZVANCE_SETTINGS_SYNC_IN
 _ROUTE_SYNC_MIN_GAP_S = max(2.0, _read_env_float("QUIZVANCE_ROUTE_SYNC_MIN_GAP_S", 6.0))
 
 
-def _normalize_ai_provider(value: str) -> str:
-    v = str(value or "").strip().lower()
-    return v if v in _AI_KEY_PROVIDERS else "gemini"
-
-
-def _provider_api_field(provider: str) -> str:
-    return f"api_key_{_normalize_ai_provider(provider)}"
-
-
-def _extract_user_api_keys(usuario: Optional[dict]) -> dict[str, str]:
-    user = usuario or {}
-    keys: dict[str, str] = {}
-    for p in _AI_KEY_PROVIDERS:
-        keys[p] = str(user.get(_provider_api_field(p)) or "").strip()
-    legacy = str(user.get("api_key") or "").strip()
-    if legacy and not any(bool(v) for v in keys.values()):
-        provider = _normalize_ai_provider(user.get("provider") or "gemini")
-        keys[provider] = legacy
-    return keys
-
-
-def _resolve_user_api_key(usuario: Optional[dict], provider: Optional[str] = None) -> str:
-    user = usuario or {}
-    provider_key = _normalize_ai_provider(provider or user.get("provider") or "gemini")
-    keys = _extract_user_api_keys(user)
-    active = str(keys.get(provider_key) or "").strip()
-    if active:
-        return active
-    if not any(bool(v) for v in keys.values()):
-        return str(user.get("api_key") or "").strip()
-    return ""
-
-
 def _settings_signature(
     provider: str,
     model: str,
@@ -213,62 +181,6 @@ def _settings_signature(
         "api_keys": {p: (str((api_keys or {}).get(p) or "").strip() or None) for p in _AI_KEY_PROVIDERS},
     }
     return json.dumps(payload, ensure_ascii=True, sort_keys=True)
-
-
-def _create_user_ai_service(usuario: dict, force_economic: bool = False) -> Optional[AIService]:
-    if not usuario:
-        return None
-    provider_type = _normalize_ai_provider(usuario.get("provider") or "gemini")
-    api_key = _resolve_user_api_key(usuario, provider_type)
-    if not api_key:
-        return None
-    provider_config = AI_PROVIDERS.get(provider_type, AI_PROVIDERS["gemini"])
-    model_value = usuario.get("model") or provider_config.get("default_model")
-    economia_mode = bool(usuario.get("economia_mode"))
-    if economia_mode or force_economic:
-        if provider_type == "gemini":
-            model_value = "gemini-2.5-flash-lite"
-        elif provider_type == "openai":
-            model_value = "gpt-5-nano"
-        elif provider_type == "groq":
-            model_value = "llama-3.1-8b-instant"
-    anon_raw = str(usuario.get("id") or usuario.get("email") or "anon")
-    user_anon = hashlib.sha256(anon_raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
-    telemetry_opt_in = bool(usuario.get("telemetry_opt_in"))
-    try:
-        return AIService(
-            create_ai_provider(provider_type, api_key, model_value),
-            telemetry_opt_in=telemetry_opt_in,
-            user_anon=user_anon,
-        )
-    except Exception as ex:
-        log_exception(ex, "main._create_user_ai_service")
-        return None
-
-
-def _emit_opt_in_event(
-    usuario: Optional[dict],
-    event_name: str,
-    feature_name: str,
-    latency_ms: int = 0,
-    error_code: str = "",
-):
-    if not usuario or not bool(usuario.get("telemetry_opt_in")):
-        return
-    anon_raw = str(usuario.get("id") or usuario.get("email") or "anon")
-    payload = {
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds") + "Z",
-        "feature_name": str(feature_name or "app"),
-        "provider": str(usuario.get("provider") or ""),
-        "model": str(usuario.get("model") or ""),
-        "latency_ms": int(max(0, latency_ms or 0)),
-        "error_code": str(error_code or ""),
-        "user_anon": hashlib.sha256(anon_raw.encode("utf-8", errors="ignore")).hexdigest()[:16],
-    }
-    try:
-        log_event(event_name, json.dumps(payload, ensure_ascii=False))
-    except Exception:
-        pass
 
 
 def _build_focus_header(title: str, flow: str, etapa_control: ft.Control, dark: bool):
@@ -291,127 +203,6 @@ def _build_focus_header(title: str, flow: str, etapa_control: ft.Control, dark: 
     )
 
 
-def _is_ai_quota_exceeded(service: Optional[AIService]) -> bool:
-    if not service:
-        return False
-    provider = getattr(service, "provider", None)
-    kind = str(getattr(provider, "last_error_kind", "") or "").lower()
-    if kind in {"quota_hard", "quota_soft"}:
-        return True
-    msg = str(getattr(provider, "last_error_message", "") or "").lower()
-    return ("quota exceeded" in msg) or ("429" in msg) or ("rate limit" in msg)
-
-
-def _show_dialog_compat(page: Optional[ft.Page], dialog: ft.AlertDialog):
-    if not page:
-        return
-    # Flet 0.80+ API
-    if hasattr(page, "show_dialog"):
-        page.show_dialog(dialog)
-        return
-    # Legacy fallback
-    if hasattr(page, "open"):
-        page.open(dialog)
-        return
-    # Last-resort fallback for older runtimes
-    try:
-        page.dialog = dialog
-        dialog.open = True
-        page.update()
-    except Exception:
-        pass
-
-
-def _close_dialog_compat(page: Optional[ft.Page], dialog: Optional[ft.AlertDialog] = None):
-    if not page:
-        return
-    # Flet 0.80+ API
-    if hasattr(page, "pop_dialog"):
-        try:
-            page.pop_dialog()
-            return
-        except Exception:
-            pass
-    # Legacy fallback
-    if dialog is not None and hasattr(page, "close"):
-        try:
-            page.close(dialog)
-            return
-        except Exception:
-            pass
-    # Last-resort fallback
-    if dialog is not None:
-        try:
-            dialog.open = False
-            page.update()
-        except Exception:
-            pass
-
-
-def _launch_url_compat(page: Optional[ft.Page], url: str, ctx: str = "launch_url"):
-    if not page:
-        return
-    link = str(url or "").strip()
-    if not link:
-        return
-    try:
-        result = page.launch_url(link)
-        if asyncio.iscoroutine(result):
-            async def _await_result():
-                try:
-                    await result
-                except Exception as ex:
-                    log_exception(ex, f"{ctx}.await")
-            page.run_task(_await_result)
-    except Exception as ex:
-        log_exception(ex, ctx)
-
-
-def _show_quota_dialog(page: Optional[ft.Page], navigate):
-    if not page:
-        return
-    dialog = ft.AlertDialog(
-        modal=True,
-        title=ft.Text("Cota da IA esgotada"),
-        content=ft.Text(
-            "As cotas atuais da API acabaram. Voce prefere inserir uma nova API key "
-            "ou mudar o modelo/provedor (Gemini/OpenAI/Groq)?"
-        ),
-    )
-
-    def _to_settings(_):
-        _close_dialog_compat(page, dialog)
-        navigate("/settings")
-
-    def _continue_offline(_):
-        _close_dialog_compat(page, dialog)
-
-    dialog.actions = [
-        ft.TextButton("Continuar offline", on_click=_continue_offline),
-        ft.TextButton("Inserir nova API", on_click=_to_settings),
-        ft.ElevatedButton("Mudar modelo (Gemini/OpenAI/Groq)", on_click=_to_settings),
-    ]
-    dialog.actions_alignment = ft.MainAxisAlignment.END
-    _show_dialog_compat(page, dialog)
-
-
-def _is_premium_active(usuario: dict) -> bool:
-    return bool(usuario and int(usuario.get("premium_active") or 0) == 1)
-
-
-def _should_show_welcome_offer(usuario: Optional[dict]) -> bool:
-    """Tela de vantagens deve aparecer no login para quem nao esta premium ativo."""
-    return not _is_premium_active(usuario or {})
-
-
-def _backend_user_id(usuario: dict) -> int:
-    try:
-        backend_uid = int(usuario.get("backend_user_id") or 0)
-        return backend_uid if backend_uid > 0 else 0
-    except Exception:
-        return 0
-
-
 def _build_quiz_stats_event_payload(correta: bool, delta: dict) -> dict:
     now_iso = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat() + "Z"
     raw = f"{now_iso}|{int(delta.get('questoes_delta', 0) or 0)}|{int(delta.get('acertos_delta', 0) or 0)}|{int(delta.get('xp_ganho', 0) or 0)}|{1 if bool(correta) else 0}|{random.random()}"
@@ -424,363 +215,6 @@ def _build_quiz_stats_event_payload(correta: bool, delta: dict) -> dict:
         "correta": bool(correta),
         "occurred_at": now_iso,
     }
-
-
-def _generation_profile(usuario: dict, feature_key: str) -> dict:
-    if _is_premium_active(usuario):
-        return {"force_economic": False, "delay_s": 0.0, "label": "premium"}
-    if feature_key in {"quiz", "flashcards"}:
-        return {"force_economic": True, "delay_s": 0.0, "label": "free_fast"}
-    return {"force_economic": False, "delay_s": 0.0, "label": "free"}
-
-
-def _show_upgrade_dialog(page: Optional[ft.Page], navigate, message: str):
-    if not page:
-        return
-    dialog = ft.AlertDialog(
-        modal=True,
-        title=ft.Text("Recurso Premium"),
-        content=ft.Text(message),
-    )
-
-    def _go_plans(_):
-        _close_dialog_compat(page, dialog)
-        navigate("/plans")
-
-    dialog.actions = [
-        ft.TextButton("Depois", on_click=lambda _: _close_dialog_compat(page, dialog)),
-        ft.ElevatedButton("Ver planos", on_click=_go_plans),
-    ]
-    dialog.actions_alignment = ft.MainAxisAlignment.END
-    _show_dialog_compat(page, dialog)
-
-
-def _show_confirm_dialog(
-    page: Optional[ft.Page],
-    title: str,
-    message: str,
-    on_confirm: Callable[[], None],
-    confirm_label: str = "Confirmar",
-):
-    if not page:
-        return
-    dialog = ft.AlertDialog(
-        modal=True,
-        title=ft.Text(str(title or "Confirmacao")),
-        content=ft.Text(str(message or "")),
-    )
-
-    def _cancel(_):
-        _close_dialog_compat(page, dialog)
-
-    def _confirm(_):
-        _close_dialog_compat(page, dialog)
-        try:
-            on_confirm()
-        except Exception as ex:
-            log_exception(ex, "main._show_confirm_dialog.on_confirm")
-
-    dialog.actions = [
-        ft.TextButton("Cancelar", on_click=_cancel),
-        ft.ElevatedButton(confirm_label, on_click=_confirm),
-    ]
-    dialog.actions_alignment = ft.MainAxisAlignment.END
-    _show_dialog_compat(page, dialog)
-
-
-def _show_api_issue_dialog(page: Optional[ft.Page], navigate, kind: str = "generic"):
-    if not page:
-        return
-    mode = str(kind or "generic").strip().lower()
-    if mode == "quota":
-        _show_quota_dialog(page, navigate)
-        return
-    if mode == "auth":
-        title = "API key invalida"
-        message = (
-            "Nao foi possivel autenticar na IA com a chave atual. "
-            "Revise a API key em Configuracoes."
-        )
-    else:
-        title = "Erro na IA"
-        message = "Ocorreu um erro ao usar a IA. Verifique as configuracoes e tente novamente."
-
-    dialog = ft.AlertDialog(
-        modal=True,
-        title=ft.Text(title),
-        content=ft.Text(message),
-    )
-
-    def _go_settings(_):
-        _close_dialog_compat(page, dialog)
-        navigate("/settings")
-
-    dialog.actions = [
-        ft.TextButton("Fechar", on_click=lambda _: _close_dialog_compat(page, dialog)),
-        ft.ElevatedButton("Abrir configuracoes", on_click=_go_settings),
-    ]
-    dialog.actions_alignment = ft.MainAxisAlignment.END
-    _show_dialog_compat(page, dialog)
-
-
-def _set_feedback_text(control: ft.Text, message: str, tone: str = "info"):
-    palette = {
-        "info": CORES.get("texto_sec", "#6B7280"),
-        "success": CORES.get("sucesso", "#10B981"),
-        "warning": CORES.get("warning", "#F59E0B"),
-        "error": CORES.get("erro", "#EF4444"),
-    }
-    normalized = _fix_mojibake_text(str(message or ""))
-    control.value = normalized
-    control.color = palette.get(tone, palette["info"])
-    host = getattr(control, "_banner_container", None)
-    if host is not None:
-        try:
-            host.visible = bool(str(normalized).strip())
-        except Exception:
-            pass
-
-
-def _wrap_study_content(content: ft.Control, dark: bool):
-    return ft.Container(
-        expand=True,
-        bgcolor=_color("fundo", dark),
-        padding=12,
-        alignment=ft.Alignment(0, -1),
-        content=content,
-    )
-
-
-def _status_banner(control: ft.Text, dark: bool):
-    box = ft.Container(
-        visible=bool(str(getattr(control, "value", "") or "").strip()),
-        bgcolor=ft.Colors.with_opacity(0.06, _color("texto", dark)),
-        border_radius=10,
-        border=ft.border.all(1, _soft_border(dark, 0.10)),
-        padding=10,
-        content=ft.Row(
-            [
-                ft.Icon(ft.Icons.INFO_OUTLINE, size=16, color=_color("texto_sec", dark)),
-                ft.Container(expand=True, content=control),
-            ],
-            spacing=8,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        ),
-    )
-    try:
-        setattr(control, "_banner_container", box)
-    except Exception:
-        pass
-    return box
-
-
-def _is_ai_processing(state: Optional[dict]) -> bool:
-    try:
-        return int((state or {}).get("ai_busy_count") or 0) > 0
-    except Exception:
-        return False
-
-
-def _sync_ai_indicator_controls(state: Optional[dict]) -> None:
-    if not isinstance(state, dict):
-        return
-    busy_count = max(0, int(state.get("ai_busy_count") or 0))
-    busy = bool(busy_count > 0)
-    message = str(state.get("ai_busy_message") or "").strip() or "Processando com IA..."
-    box = state.get("_ai_busy_box_ctl")
-    text = state.get("_ai_busy_text_ctl")
-    bar = state.get("_ai_busy_bar_ctl")
-    try:
-        if text is not None:
-            text.value = message
-        if bar is not None:
-            bar.visible = busy
-        if box is not None:
-            box.visible = busy
-    except Exception:
-        pass
-
-
-def _begin_ai_processing(state: Optional[dict], page: Optional[ft.Page], message: str = "") -> None:
-    if not isinstance(state, dict):
-        return
-    count = max(0, int(state.get("ai_busy_count") or 0)) + 1
-    state["ai_busy_count"] = count
-    if str(message or "").strip():
-        state["ai_busy_message"] = str(message).strip()
-    elif not str(state.get("ai_busy_message") or "").strip():
-        state["ai_busy_message"] = "Processando com IA..."
-    _sync_ai_indicator_controls(state)
-    if page:
-        try:
-            page.update()
-        except Exception:
-            pass
-
-
-def _end_ai_processing(state: Optional[dict], page: Optional[ft.Page]) -> None:
-    if not isinstance(state, dict):
-        return
-    count = max(0, int(state.get("ai_busy_count") or 0) - 1)
-    state["ai_busy_count"] = count
-    if count == 0:
-        state["ai_busy_message"] = ""
-    _sync_ai_indicator_controls(state)
-    if count == 0 and bool(state.get("pending_theme_refresh")):
-        state["pending_theme_refresh"] = False
-        refresh_cb = state.get("_theme_refresh_cb")
-        if callable(refresh_cb):
-            try:
-                refresh_cb(None)
-            except TypeError:
-                try:
-                    refresh_cb()
-                except Exception:
-                    pass
-            except Exception:
-                pass
-    if page:
-        try:
-            page.update()
-        except Exception:
-            pass
-
-
-def _schedule_ai_task(
-    page: Optional[ft.Page],
-    state: Optional[dict],
-    coro_fn: Callable[..., Any],
-    *args,
-    message: str = "Processando com IA...",
-    status_control: Optional[ft.Text] = None,
-) -> bool:
-    if not page:
-        return False
-    if _is_ai_processing(state):
-        if status_control is not None:
-            _set_feedback_text(status_control, "Aguarde: a IA ainda esta processando a solicitacao anterior.", "info")
-        else:
-            try:
-                ds_toast(page, "IA em processamento. Aguarde concluir.", tipo="info")
-            except Exception:
-                pass
-        try:
-            page.update()
-        except Exception:
-            pass
-        return False
-
-    _begin_ai_processing(state, page, message=message)
-    if status_control is not None and str(message or "").strip():
-        _set_feedback_text(status_control, str(message).strip(), "info")
-        try:
-            page.update()
-        except Exception:
-            pass
-
-    async def _runner():
-        try:
-            await coro_fn(*args)
-        finally:
-            _end_ai_processing(state, page)
-
-    try:
-        page.run_task(_runner)
-        return True
-    except Exception:
-        _end_ai_processing(state, page)
-        return False
-
-
-def _soft_border(dark: bool, alpha: float = 0.10):
-    return ft.Colors.with_opacity(alpha, _color("texto", dark))
-
-
-def _style_form_controls(control: ft.Control, dark: bool):
-    if control is None:
-        return
-    try:
-        if isinstance(control, ft.TextField):
-            control.filled = True
-            control.fill_color = ft.Colors.with_opacity(0.05, _color("texto", dark))
-            control.border_color = _soft_border(dark, 0.12)
-            control.focused_border_color = CORES["primaria"]
-            control.border_radius = 12
-            if getattr(control, "text_size", None) is None:
-                control.text_size = 15
-        elif isinstance(control, ft.Dropdown):
-            control.filled = True
-            control.fill_color = ft.Colors.with_opacity(0.05, _color("texto", dark))
-            control.border_color = _soft_border(dark, 0.12)
-            control.focused_border_color = CORES["primaria"]
-            control.border_radius = 12
-            if getattr(control, "text_size", None) is None:
-                control.text_size = 15
-        elif isinstance(control, ft.Switch):
-            control.active_color = CORES["primaria"]
-            control.inactive_track_color = _soft_border(dark, 0.20)
-            control.inactive_thumb_color = _soft_border(dark, 0.45)
-    except Exception:
-        pass
-
-    for child_attr in ("controls", "content", "leading", "title", "subtitle", "trailing"):
-        if not hasattr(control, child_attr):
-            continue
-        child = getattr(control, child_attr)
-        if child is None:
-            continue
-        if isinstance(child, list):
-            for item in child:
-                _style_form_controls(item, dark)
-        else:
-            _style_form_controls(child, dark)
-
-
-def _apply_global_theme(page: ft.Page):
-    page.theme = ft.Theme(
-        use_material3=True,
-        color_scheme_seed=CORES["primaria"],
-        card_bgcolor=CORES["card"],
-        scaffold_bgcolor=CORES["fundo"],
-        divider_color=ft.Colors.with_opacity(0.08, CORES["texto"]),
-    )
-    page.dark_theme = ft.Theme(
-        use_material3=True,
-        color_scheme_seed=CORES["texto_sec_escuro"],
-        card_bgcolor=CORES["card_escuro"],
-        scaffold_bgcolor=CORES["fundo_escuro"],
-        divider_color=ft.Colors.with_opacity(0.10, CORES["texto_escuro"]),
-    )
-
-
-def _logo_control(dark: bool):
-    logo_path = os.path.join("assets", "logo_quizvance.png")
-    if os.path.exists(logo_path):
-        return ft.Image(src=logo_path, width=220, height=220, fit="contain"), True
-    return ft.Text("Quiz Vance", size=32, weight=ft.FontWeight.BOLD, color=_color("texto", dark)), False
-
-def _logo_small(dark: bool):
-    logo_path = os.path.join("assets", "logo_quizvance.png")
-    if os.path.exists(logo_path):
-        return ft.Image(src=logo_path, width=110, height=110, fit="contain")
-    return ft.Text("Quiz Vance", size=18, weight=ft.FontWeight.BOLD, color=_color("texto", dark))
-
-
-def _normalize_uploaded_file_path(file_path: str) -> str:
-    raw = str(file_path or "").strip()
-    if not raw:
-        return ""
-    if raw.lower().startswith("file://"):
-        try:
-            parsed = urlparse(raw)
-            uri_path = unquote(parsed.path or "")
-            # file:///C:/... em Windows chega com barra inicial.
-            if os.name == "nt" and len(uri_path) >= 3 and uri_path[0] == "/" and uri_path[2] == ":":
-                uri_path = uri_path[1:]
-            return uri_path or raw
-        except Exception:
-            return raw
-    return raw
 
 
 def _read_uploaded_study_text(file_path: str) -> str:
@@ -5973,6 +5407,20 @@ def _build_settings_body(state, navigate, dark: bool):
                 state["usuario"][_provider_api_field(p)] = str(api_keys.get(p) or "").strip() or None
             state["usuario"]["economia_mode"] = 1 if economia_mode_switch.value else 0
             state["usuario"]["telemetry_opt_in"] = 1 if telemetry_opt_in_switch.value else 0
+            normalized_keys = {
+                p: (str(api_keys.get(p) or "").strip() or None)
+                for p in _AI_KEY_PROVIDERS
+            }
+            state["settings_sync_signature"] = _settings_signature(
+                provider_value,
+                model_value,
+                bool(economia_mode_switch.value),
+                bool(telemetry_opt_in_switch.value),
+                normalized_keys,
+            )
+            now_mono = time.monotonic()
+            state["last_settings_sync_ts"] = now_mono
+            state["settings_local_dirty_until_ts"] = now_mono + max(10.0, _SETTINGS_SYNC_INTERVAL_S)
 
             backend_ref = state.get("backend")
             backend_uid = _backend_user_id(state.get("usuario") or {})
@@ -6850,6 +6298,7 @@ def main(page: ft.Page):
             "sync_loop_interval_s": _QUIZ_STATS_SYNC_INTERVAL_S,
             "last_summary_sync_ts": 0.0,
             "last_settings_sync_ts": 0.0,
+            "settings_local_dirty_until_ts": 0.0,
             "stats_summary_signature": "",
             "settings_sync_signature": "",
             "ai_busy_count": 0,
@@ -7030,9 +6479,7 @@ def main(page: ft.Page):
             except Exception as ex:
                 log_exception(ex, "main._sync_quiz_stats_once.backend")
                 return False
-            consumed = list((resp or {}).get("consumed_event_ids") or [])
-            if not consumed:
-                consumed = [str(ev.get("event_id") or "") for ev in events]
+            consumed = resolve_consumed_event_ids(resp if isinstance(resp, dict) else {}, events)
             delete_ids = [event_to_row.get(str(eid or "").strip(), 0) for eid in consumed]
             delete_ids = [int(i) for i in delete_ids if int(i or 0) > 0]
             if delete_ids:
@@ -7050,6 +6497,9 @@ def main(page: ft.Page):
         now = time.monotonic()
         min_gap = _ROUTE_SYNC_MIN_GAP_S if force else _SETTINGS_SYNC_INTERVAL_S
         if (now - float(state.get("last_settings_sync_ts") or 0.0)) < min_gap:
+            return False
+        dirty_until = float(state.get("settings_local_dirty_until_ts") or 0.0)
+        if now < dirty_until:
             return False
         db_ref = state.get("db")
         backend_ref = state.get("backend")
@@ -7074,11 +6524,15 @@ def main(page: ft.Page):
             model = model_raw or local_model or default_model
             if modelos and model not in modelos:
                 model = default_model
-            api_keys_remote: dict[str, Optional[str]] = {}
+            api_keys_remote: dict[str, Optional[str]] = {
+                p: (str((_extract_user_api_keys(usuario or {}) or {}).get(p) or "").strip() or None)
+                for p in _AI_KEY_PROVIDERS
+            }
             for p in _AI_KEY_PROVIDERS:
                 raw = (remote_cfg or {}).get(_provider_api_field(p))
                 txt = str(raw).strip() if raw is not None else ""
-                api_keys_remote[p] = txt or None
+                if txt:
+                    api_keys_remote[p] = txt
             active_raw = (remote_cfg or {}).get("api_key")
             active_key = str(active_raw).strip() if active_raw is not None else ""
             if active_key and not api_keys_remote.get(provider):
@@ -7346,6 +6800,7 @@ def main(page: ft.Page):
         state["stats_summary_signature"] = ""
         state["last_summary_sync_ts"] = 0.0
         state["last_settings_sync_ts"] = 0.0
+        state["settings_local_dirty_until_ts"] = 0.0
         log_event("logout", "user logout")
         log_state("state_after_logout")
         navigate("/login")

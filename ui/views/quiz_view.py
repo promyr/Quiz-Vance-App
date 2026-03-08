@@ -11,7 +11,15 @@ import flet as ft
 
 from core.helpers.ui_helpers import screen_width, screen_height, build_focus_header, wrap_study_content, status_banner, is_premium_active
 from core.ui_route_theme import _normalize_route_path
-from core.helpers.ai_helpers import create_user_ai_service, extract_user_api_keys, is_ai_quota_exceeded, ai_issue_kind, schedule_ai_task, generation_profile
+from core.helpers.ai_helpers import (
+    create_user_ai_service,
+    extract_user_api_keys,
+    provider_api_field,
+    is_ai_quota_exceeded,
+    ai_issue_kind,
+    schedule_ai_task,
+    generation_profile,
+)
 from core.helpers.file_helpers import normalize_uploaded_file_path, extract_uploaded_material, format_upload_info_label, pick_study_files
 from ui.design_system import DS, AppText, ds_card, ds_btn_primary, ds_btn_ghost, ds_empty_state, ds_toast, ds_bottom_sheet, ds_section_title, ds_stat_card, ds_badge, ds_divider, ds_skeleton, ds_skeleton_card, ds_chip, ds_btn_secondary, ds_progress_bar, ds_icon_btn, ds_action_bar, ds_content_text
 from core.error_monitor import log_exception
@@ -195,7 +203,7 @@ def build_quiz_body(state, navigate, dark: bool):
         if page:
             page.update()
     quiz_count_dropdown.on_change = _on_count_change
-    preview_count_text.value = "\u221e" if quiz_count_dropdown.value == "cont" else str(quiz_count_dropdown.value or "10")
+    preview_count_text.value = "\u221e" if quiz_count_dropdown.value in {"cont", "inf"} else str(quiz_count_dropdown.value or "10")
     session_mode_dropdown = ft.Dropdown(
         label="Sessao",
         width=field_w_small if compact else 220,
@@ -402,7 +410,7 @@ def build_quiz_body(state, navigate, dark: bool):
         topic_field.value = str(preset.get("topic") or "")
         difficulty_dropdown.value = str(preset.get("difficulty") or dificuldade_padrao)
         quiz_count_dropdown.value = str(preset.get("count") or "10")
-        preview_count_text.value = "\u221e" if quiz_count_dropdown.value == "cont" else str(quiz_count_dropdown.value or "10")
+        preview_count_text.value = "\u221e" if quiz_count_dropdown.value in {"cont", "inf"} else str(quiz_count_dropdown.value or "10")
         session_mode_dropdown.value = str(preset.get("session_mode") or "nova")
         simulado_mode_switch.value = bool(preset.get("simulado_mode", False))
         _sync_feedback_policy_ui()
@@ -543,15 +551,19 @@ def build_quiz_body(state, navigate, dark: bool):
         ]
         if len(alternativas) < 2:
             return None
+        alternativas_ui = alternativas[:4]
         correta_idx = q.get("correta_index", q.get("correta", 0))
         try:
             correta_idx = int(correta_idx)
         except Exception:
             correta_idx = 0
-        correta_idx = max(0, min(correta_idx, len(alternativas) - 1))
+        if len(alternativas) > 4 and correta_idx >= 4:
+            # Evita recortar alternativas e manter gabarito errado.
+            return None
+        correta_idx = max(0, min(correta_idx, len(alternativas_ui) - 1))
         out = {
             "enunciado": enunciado,
-            "alternativas": alternativas[:4],
+            "alternativas": alternativas_ui,
             "correta_index": correta_idx,
         }
         if q.get("explicacao"):
@@ -609,6 +621,7 @@ def build_quiz_body(state, navigate, dark: bool):
         topic_field.value = filtro.get("topic", "")
         difficulty_dropdown.value = filtro.get("difficulty", dificuldade_padrao)
         quiz_count_dropdown.value = str(filtro.get("count", 5))
+        preview_count_text.value = "\u221e" if (quiz_count_dropdown.value or "") in {"cont", "inf"} else str(quiz_count_dropdown.value or "10")
         session_mode_dropdown.value = filtro.get("session_mode", "nova")
         simulado_mode_switch.value = bool(filtro.get("simulado_mode", False))
         _sync_feedback_policy_ui()
@@ -1861,15 +1874,53 @@ def build_quiz_body(state, navigate, dark: bool):
             current_model = str(user.get("model") or "").strip()
             fallback_model = str(cfg.get("default_model") or (model_candidates[0] if model_candidates else current_model)).strip()
             next_model = current_model if current_model in model_candidates else fallback_model
+            keys = extract_user_api_keys(user)
+            active_key = str(keys.get(selected) or "").strip() or None
             user["provider"] = selected
             if next_model:
                 user["model"] = next_model
+            user["api_key"] = active_key
+            user[provider_api_field(selected)] = active_key
             if isinstance(state.get("usuario"), dict):
                 state["usuario"]["provider"] = selected
                 if next_model:
                     state["usuario"]["model"] = next_model
+                state["usuario"]["api_key"] = active_key
+                state["usuario"][provider_api_field(selected)] = active_key
             if db and user.get("id") and hasattr(db, "atualizar_provider_ia"):
                 db.atualizar_provider_ia(int(user["id"]), selected, next_model or fallback_model)
+            state["last_settings_sync_ts"] = time.monotonic()
+
+            backend_ref = state.get("backend")
+            backend_uid = backend_user_id(state.get("usuario") or {})
+
+            async def _push_provider_switch_async():
+                if not (backend_ref and backend_ref.enabled()):
+                    return
+                if int(backend_uid or 0) <= 0:
+                    return
+                try:
+                    current_keys = extract_user_api_keys(user)
+                    await asyncio.to_thread(
+                        backend_ref.upsert_user_settings,
+                        int(backend_uid),
+                        selected,
+                        next_model or fallback_model,
+                        str(current_keys.get(selected) or "").strip() or None,
+                        bool(user.get("economia_mode")),
+                        bool(user.get("telemetry_opt_in")),
+                        api_key_gemini=str(current_keys.get("gemini") or "").strip() or None,
+                        api_key_openai=str(current_keys.get("openai") or "").strip() or None,
+                        api_key_groq=str(current_keys.get("groq") or "").strip() or None,
+                    )
+                except Exception as ex_remote:
+                    log_exception(ex_remote, "quiz_view.switch_provider_and_retry.sync_remote")
+
+            if page:
+                try:
+                    page.run_task(_push_provider_switch_async)
+                except Exception as ex_task:
+                    log_exception(ex_task, "quiz_view.switch_provider_and_retry.schedule_remote")
             provider_name = str(cfg.get("name") or selected)
             set_feedback_text(status_text, f"Provider alterado para {provider_name}. Reexecutando geracao...", "info")
             if page:

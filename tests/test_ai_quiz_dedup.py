@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import re
+
 from core.ai_service_v2 import AIProvider, AIService
 
 
@@ -168,3 +170,63 @@ def test_is_metadata_question_keeps_content_question():
     assert not service._is_metadata_question(
         "Como a biodiversidade marinha da Amazonia Azul contribui para o equilibrio ambiental brasileiro?"
     )
+
+
+def test_normalize_quiz_maps_textual_correct_answer_to_matching_option():
+    service = AIService(_DummyProvider())
+    raw = {
+        "pergunta": "Qual alternativa corresponde ao principal vetor logistico do comercio exterior brasileiro?",
+        "opcoes": [
+            "Transporte ferroviario de cabotagem continental.",
+            "Transporte maritimo nas rotas de exportacao e importacao.",
+            "Aviacao regional de curta distancia.",
+            "Modal dutoviario para bens industrializados.",
+        ],
+        "resposta_correta": "Transporte maritimo nas rotas de exportacao e importacao.",
+        "explicacao": "ok",
+    }
+    out = service._normalize_quiz(raw)
+    assert out is not None
+    idx = int(out.get("correta_index", 0))
+    assert str(out.get("opcoes", [])[idx]).startswith("Transporte maritimo")
+
+
+def test_normalize_quiz_discards_when_correct_answer_is_outside_truncated_options():
+    service = AIService(_DummyProvider())
+    raw = {
+        "pergunta": "Qual alternativa identifica corretamente o fator decisivo?",
+        "opcoes": [
+            "Distrator 1",
+            "Distrator 2",
+            "Distrator 3",
+            "Distrator 4",
+            "Opcao correta fora do limite",
+        ],
+        "correta_index": 4,
+        "explicacao": "ok",
+    }
+    out = service._normalize_quiz(raw)
+    assert out is None
+
+
+def test_select_source_snippets_rotates_even_with_single_large_block():
+    service = AIService(_DummyProvider())
+    block_parts = []
+    for idx in range(14):
+        block_parts.append(
+            (
+                f"[S{idx:02d}] Subtema {idx} com detalhes tecnicos e aplicacoes praticas "
+                f"para analise comparativa entre cenarios operacionais."
+            )
+            * 8
+        )
+    large_block = "\n\n".join(block_parts)
+
+    first = service._select_source_snippets([large_block], topic=None, max_items=4, max_chars=3200)
+    second = service._select_source_snippets([large_block], topic=None, max_items=4, max_chars=3200)
+    marks_first = set(re.findall(r"\[S\d{2}\]", first))
+    marks_second = set(re.findall(r"\[S\d{2}\]", second))
+
+    assert marks_first
+    assert marks_second
+    assert marks_first != marks_second

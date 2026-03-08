@@ -13,9 +13,23 @@ import warnings
 import sys
 import os
 import re
+import hashlib
 import unicodedata
 from typing import Optional, Dict, List, Any
 from abc import ABC, abstractmethod
+
+try:
+    from quiz_prompt_v2 import (
+        _build_quiz_prompt as _build_quiz_prompt_v2,
+        _build_system_prompt as _build_system_prompt_v2,
+        validate_question as _validate_question_v2,
+        sanitize_question as _sanitize_question_v2,
+    )
+except Exception:
+    _build_quiz_prompt_v2 = None
+    _build_system_prompt_v2 = None
+    _validate_question_v2 = None
+    _sanitize_question_v2 = None
 
 try:
     from core.error_monitor import log_event
@@ -330,6 +344,8 @@ class AIService:
         self.provider = provider
         self.telemetry_opt_in = bool(telemetry_opt_in)
         self.user_anon = str(user_anon or "anon")
+        self._snippet_rotation_cursors: Dict[str, int] = {}
+        self._quiz_prompt_page = 1
 
     def _emit_ai_event(
         self,
@@ -399,13 +415,14 @@ class AIService:
         )
         
         # Extrair resposta correta
-        correta = data.get("correta_index") or data.get("indice_correto")
+        correta = data.get("correta_index")
         if correta is None:
-            correta = (
-                data.get("resposta_correta") or
-                data.get("answer") or
-                data.get("correct_answer")
-            )
+            correta = data.get("indice_correto")
+        if correta is None:
+            for key in ("resposta_correta", "answer", "correct_answer"):
+                if key in data and data.get(key) is not None:
+                    correta = data.get(key)
+                    break
         
         # Extrair explicaÃ§Ã£o
         explicacao = (
@@ -449,11 +466,15 @@ class AIService:
         opcoes_norm = [o.strip() for o in opcoes_norm if o and str(o).strip()]
         if len(opcoes_norm) < 2:
             return None
-        if len(opcoes_norm) > 4:
-            opcoes_norm = opcoes_norm[:4]
+
+        def _option_signature(value: Any) -> str:
+            txt = self._fold_text(str(value or ""))
+            txt = re.sub(r"^(?:[a-e]|[0-9]{1,2})[\)\.\:\-]\s*", "", txt)
+            return " ".join(txt.split())
         
         # Normalizar Ã­ndice correto
         correta_idx = None
+        answer_text_hint = ""
         if isinstance(correta, int):
             correta_idx = correta
         elif isinstance(correta, str):
@@ -465,10 +486,43 @@ class AIService:
                     correta_idx = int(c)
                 except Exception:
                     correta_idx = None
+                    answer_text_hint = str(correta or "").strip()
+
+        # Fallback robusto: alguns modelos retornam o texto da resposta correta.
+        if correta_idx is None and answer_text_hint:
+            target_sig = _option_signature(answer_text_hint)
+            if target_sig:
+                option_sigs = [_option_signature(opt) for opt in opcoes_norm]
+                for idx, sig in enumerate(option_sigs):
+                    if sig == target_sig:
+                        correta_idx = idx
+                        break
+                if correta_idx is None:
+                    for idx, sig in enumerate(option_sigs):
+                        if (target_sig and target_sig in sig) or (sig and sig in target_sig):
+                            correta_idx = idx
+                            break
+
+        # Se vierem >4 opcoes e a correta estiver fora do recorte, descarte para evitar gabarito incorreto.
+        if len(opcoes_norm) > 4:
+            if isinstance(correta_idx, int) and correta_idx >= 4:
+                return None
+            opcoes_norm = opcoes_norm[:4]
         
         if correta_idx is None:
             correta_idx = 0
         correta_idx = max(0, min(correta_idx, len(opcoes_norm) - 1))
+
+        # Evita viés posicional (sempre alternativa A) com rotação determinística.
+        if len(opcoes_norm) >= 2:
+            try:
+                seed_src = f"{pergunta.strip()}|{'|'.join(opcoes_norm)}|{correta_idx}"
+                offset = int(hashlib.sha1(seed_src.encode("utf-8", errors="ignore")).hexdigest()[:8], 16) % len(opcoes_norm)
+            except Exception:
+                offset = 0
+            if offset:
+                opcoes_norm = opcoes_norm[offset:] + opcoes_norm[:offset]
+                correta_idx = (correta_idx - offset) % len(opcoes_norm)
         
         normalized = {
             "pergunta": pergunta.strip(),
@@ -685,24 +739,109 @@ class AIService:
         max_chars: int = 6000,
     ) -> str:
         blocos: List[str] = []
+
+        def _segment_long_block(text: str, window: int = 1100, stride: int = 700) -> List[str]:
+            raw = str(text or "").strip()
+            if not raw:
+                return []
+            normalized = " ".join(raw.split())
+            if len(normalized) <= int(window):
+                return [raw]
+            out: List[str] = []
+            total = len(normalized)
+            pos = 0
+            while pos < total:
+                end = min(total, pos + int(window))
+                cut = end
+                if end < total:
+                    extra_end = min(total, end + 180)
+                    extra = normalized[end:extra_end]
+                    punct = max(extra.find(". "), extra.find("? "), extra.find("! "), extra.find("; "))
+                    if punct >= 0:
+                        cut = min(total, end + punct + 1)
+                chunk = normalized[pos:cut].strip()
+                if len(chunk) >= 240:
+                    out.append(chunk)
+                if cut >= total:
+                    break
+                pos += max(280, int(stride))
+            return out or [normalized[: int(window)].strip()]
+
         for raw in (content or []):
             txt = self._strip_metadata_noise(raw)
             if txt:
-                blocos.append(txt)
+                blocos.extend(_segment_long_block(txt))
         if not blocos:
             return ""
 
+        def _pick_rotating_spread(pool: List[str], amount: int, cursor_key: str) -> List[str]:
+            if amount <= 0 or not pool:
+                return []
+            if len(pool) <= amount:
+                return list(pool)
+            total = len(pool)
+            if cursor_key in self._snippet_rotation_cursors:
+                cursor = int(self._snippet_rotation_cursors.get(cursor_key, 0) or 0) % total
+            else:
+                cursor = random.randint(0, max(0, total - 1))
+            step = max(1, total // amount)
+            picked_idx: List[int] = []
+            seen_idx = set()
+            for i in range(amount):
+                idx = int((cursor + (i * step)) % total)
+                if idx in seen_idx:
+                    continue
+                seen_idx.add(idx)
+                picked_idx.append(idx)
+            if len(picked_idx) < amount:
+                for extra in range(total):
+                    idx = int((cursor + extra) % total)
+                    if idx in seen_idx:
+                        continue
+                    seen_idx.add(idx)
+                    picked_idx.append(idx)
+                    if len(picked_idx) >= amount:
+                        break
+            self._snippet_rotation_cursors[cursor_key] = (cursor + amount) % total
+            return [pool[i] for i in picked_idx[:amount]]
+
         ordered = list(blocos)
         topic_txt = str(topic or "").strip().lower()
+        quantidade = max(1, int(max_items or 1))
+        prioritized: List[str] = []
         if topic_txt:
             tokens = [t for t in re.split(r"\W+", topic_txt) if len(t) >= 3]
             if tokens:
                 prioritized = [b for b in blocos if any(tok in b.lower() for tok in tokens)]
-                if prioritized:
-                    remainder = [b for b in blocos if b not in prioritized]
-                    ordered = prioritized + remainder
 
-        selected = ordered[: max(1, int(max_items or 1))]
+        selected: List[str] = []
+        if prioritized:
+            qtd_prioridade = min(len(prioritized), max(1, (quantidade + 1) // 2))
+            selected.extend(
+                _pick_rotating_spread(
+                    prioritized,
+                    qtd_prioridade,
+                    f"topic::{topic_txt}::{len(prioritized)}::{quantidade}",
+                )
+            )
+            faltam = quantidade - len(selected)
+            if faltam > 0:
+                remainder = [b for b in ordered if b not in selected]
+                selected.extend(
+                    _pick_rotating_spread(
+                        remainder,
+                        faltam,
+                        f"all::{topic_txt}::{len(remainder)}::{quantidade}",
+                    )
+                )
+        else:
+            selected = _pick_rotating_spread(
+                ordered,
+                quantidade,
+                f"all::{topic_txt}::{len(ordered)}::{quantidade}",
+            )
+        if not selected:
+            selected = ordered[:quantidade]
         joined = "\n\n".join(selected)
         return joined[: max(300, int(max_chars or 6000))]
 
@@ -1081,33 +1220,61 @@ class AIService:
             print("[AI] Sem conteudo ou topico")
             return []
 
-        avoid_block = ""
+        itens_bloqueio: List[str] = []
         if isinstance(avoid_questions, list):
-            itens_bloqueio: List[str] = []
             for q in avoid_questions:
                 txt = " ".join(str(q or "").split()).strip()
                 if txt:
                     itens_bloqueio.append(txt[:180])
                 if len(itens_bloqueio) >= 20:
                     break
+
+        prompt = ""
+        prompt_page = int(max(1, int(getattr(self, "_quiz_prompt_page", 1) or 1)))
+        self._quiz_prompt_page = prompt_page + 1
+        prompt_chunks = list(content or [])
+        if content:
+            sampled_txt = self._select_source_snippets(content, topic=topic, max_items=6, max_chars=6000)
+            prompt_chunks = [line.strip() for line in sampled_txt.splitlines() if line.strip()]
+        if callable(_build_quiz_prompt_v2):
+            try:
+                prompt = _build_quiz_prompt_v2(
+                    chunks=prompt_chunks,
+                    tema=str(topic or ""),
+                    dificuldade=str(difficulty or ""),
+                    qtd=quantidade,
+                    pagina=prompt_page,
+                    evitar=(itens_bloqueio or None),
+                )
+                if callable(_build_system_prompt_v2):
+                    sys_prompt = str(_build_system_prompt_v2() or "").strip()
+                    if sys_prompt:
+                        prompt = f"{sys_prompt}\n\n{prompt}"
+            except Exception as ex:
+                print(f"[AI] Fallback para prompt interno: {ex}")
+
+        if not prompt:
+            avoid_block = ""
             if itens_bloqueio:
-                avoid_block = "HISTORICO — nao recrie nem parafraseie estas perguntas:\n"
+                avoid_block = "HISTORICO - nao recrie nem parafraseie estas perguntas:\n"
                 avoid_block += "\n".join(f"- {item}" for item in itens_bloqueio)
                 avoid_block += "\n"
 
-        # Instrucao de profundidade por nivel
-        _nivel_map = {
-            "facil":         "FACIL: conceito central direto; distratores erram um detalhe concreto.",
-            "medio":         "INTERMEDIARIO: exija relacao causa-efeito ou aplicacao do conceito; distratores invertem a logica.",
-            "intermediario": "INTERMEDIARIO: exija relacao causa-efeito ou aplicacao do conceito; distratores invertem a logica.",
-            "dificil":       "DIFICIL: questao-problema com raciocinio de multiplas etapas; distratores sao conclusoes parcialmente corretas.",
-        }
-        nivel_instrucao = _nivel_map.get(str(difficulty or "").lower(), _nivel_map["intermediario"])
+            # Instrucao de profundidade por nivel
+            _nivel_map = {
+                "facil":         "FACIL: conceito central direto; distratores erram um detalhe concreto.",
+                "medio":         "INTERMEDIARIO: exija relacao causa-efeito ou aplicacao do conceito; distratores invertem a logica.",
+                "intermediario": "INTERMEDIARIO: exija relacao causa-efeito ou aplicacao do conceito; distratores invertem a logica.",
+                "dificil":       "DIFICIL: questao-problema com raciocinio de multiplas etapas; distratores sao conclusoes parcialmente corretas.",
+            }
+            nivel_instrucao = _nivel_map.get(str(difficulty or "").lower(), _nivel_map["intermediario"])
 
-        # Sequencia sugerida de correta_index para evitar vies posicional
-        indices_seq = ", ".join(str(i % 4) for i in range(quantidade))
+            # Sequencia sugerida de correta_index para evitar vies posicional
+            idx_offset = (prompt_page - 1) % 4
+            indices_seq = ", ".join(str((idx_offset + i) % 4) for i in range(quantidade))
+            sample_index = (idx_offset + 2) % 4
 
-        prompt = f"""Voce e um elaborador senior de questoes para concursos publicos brasileiros de alto nivel (CESPE, FCC, VUNESP).
+            prompt = f"""Voce e um elaborador senior de questoes para concursos publicos brasileiros de alto nivel (CESPE, FCC, VUNESP).
 
 {contexto}
 {avoid_block}
@@ -1120,7 +1287,7 @@ REGRAS OBRIGATORIAS:
 3. Proibido decoreba ("O que e X?"). Exija raciocinio, comparacao ou aplicacao.
 4. Ignore metadados do material (autor, ISBN, editora, edicao, datas, sumario, codigos de curso).
 5. Cada distrator deve usar conceito real do material, mas aplicado no contexto errado.
-6. Varie os valores de correta_index — sequencia sugerida: [{indices_seq}].
+6. Varie os valores de correta_index - sequencia sugerida: [{indices_seq}].
 7. Se nao houver base suficiente no texto, retorne [].
 
 LIMITES DE CARACTERES (ultrapassar causa descarte):
@@ -1134,7 +1301,7 @@ Retorne APENAS JSON valido, sem markdown, sem texto antes ou depois:
     "pergunta": "Enunciado tecnico e direto",
     "subtema": "Subtema curto",
     "opcoes": ["Opcao correta", "Distrator 1", "Distrator 2", "Distrator 3"],
-    "correta_index": 0,
+    "correta_index": {sample_index},
     "explicacao": "Razao objetiva da resposta correta."
   }}
 ]
@@ -1155,6 +1322,10 @@ Retorne APENAS JSON valido, sem markdown, sem texto antes ou depois:
                 normalizadas = self._normalize_quiz_batch_payload(data, quantidade)
                 normalizadas = [q for q in normalizadas if not self._is_metadata_question(str(q.get("pergunta") or ""))]
                 normalizadas = [q for q in normalizadas if self.validate_task_payload("quiz", q)[0]]
+                if callable(_sanitize_question_v2):
+                    normalizadas = [_sanitize_question_v2(dict(q)) for q in normalizadas if isinstance(q, dict)]
+                if callable(_validate_question_v2):
+                    normalizadas = [q for q in normalizadas if _validate_question_v2(q)]
                 if normalizadas:
                     print(f"[AI] [OK] {len(normalizadas)} questoes geradas em lote")
                     return normalizadas
