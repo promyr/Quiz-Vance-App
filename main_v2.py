@@ -2000,6 +2000,10 @@ def _build_splash(page: ft.Page, navigate, dark: bool):
         ],
         bgcolor=splash_bg,
     )
+    try:
+        view.can_pop = False
+    except Exception:
+        pass
     return view, logo_box, tagline
 
 
@@ -7163,6 +7167,13 @@ def main(page: ft.Page):
     page.on_view_pop = view_pop
     page.on_keyboard_event = _on_keyboard_event
     page.on_resized = on_resized
+    try:
+        # Android: impedir fechamento da janela pelo back do sistema.
+        if getattr(page, "window", None) is not None:
+            page.window.prevent_close = True
+            page.window.on_close = lambda e: None
+    except Exception:
+        pass
     page.update()
     # Splash e runtime em paralelo para reduzir percepcao de lentidao:
     # 1) mostra splash
@@ -7212,3 +7223,8 @@ def main(page: ft.Page):
         # Fallback para versoes de Flet com comportamento diferente em run_task.
         log_exception(ex, "main.run_splash")
         page.go("/login")
+        try:
+            if page.views:
+                page.views[0].can_pop = False
+        except Exception:
+            pass
