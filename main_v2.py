@@ -159,7 +159,7 @@ _QUIZ_STATS_SYNC_INTERVAL_S = max(
     8.0,
     _read_env_float(
         "QUIZVANCE_STATS_SYNC_INTERVAL_S",
-        _read_env_float("QUIZVANCE_CLOUD_SYNC_INTERVAL_S", 20.0),
+        _read_env_float("QUIZVANCE_CLOUD_SYNC_INTERVAL_S", 8.0 if is_android() else 20.0),
     ),
 )
 _SETTINGS_SYNC_INTERVAL_S = max(8.0, _read_env_float("QUIZVANCE_SETTINGS_SYNC_INTERVAL_S", 20.0))
@@ -6406,6 +6406,7 @@ def main(page: ft.Page):
                 "today_questoes": int((summary_raw or {}).get("today_questoes") or 0),
                 "today_acertos": int((summary_raw or {}).get("today_acertos") or 0),
                 "today_xp": int((summary_raw or {}).get("today_xp") or 0),
+                "streak_dias": int((summary_raw or {}).get("streak_dias") or 0),
             }
             await asyncio.to_thread(
                 db_ref.sync_cloud_quiz_totals,
@@ -6415,6 +6416,7 @@ def main(page: ft.Page):
                 int(summary.get("total_xp") or 0),
                 int(summary.get("today_questoes") or 0),
                 int(summary.get("today_acertos") or 0),
+                int(summary.get("streak_dias") or 0),
             )
             prev_sig = str(state.get("stats_summary_signature") or "")
             next_sig = json.dumps(summary, ensure_ascii=True, sort_keys=True)
@@ -6429,11 +6431,14 @@ def main(page: ft.Page):
                 state["usuario"]["total_questoes"] = max(prev_local[0], int(summary.get("total_questoes") or 0))
                 state["usuario"]["acertos"] = max(prev_local[1], int(summary.get("total_acertos") or 0))
                 state["usuario"]["xp"] = max(prev_local[2], int(summary.get("total_xp") or 0))
+                prev_streak = int(state["usuario"].get("streak_dias", 0) or 0)
+                state["usuario"]["streak_dias"] = max(prev_streak, int(summary.get("streak_dias") or 0))
                 changed = changed or prev_local != (
                     int(state["usuario"].get("total_questoes", 0) or 0),
                     int(state["usuario"].get("acertos", 0) or 0),
                     int(state["usuario"].get("xp", 0) or 0),
                 )
+                changed = changed or (int(state["usuario"].get("streak_dias", 0) or 0) != prev_streak)
             return bool(changed)
         except Exception as ex_summary:
             log_exception(ex_summary, "main._sync_cloud_quiz_summary_once")
@@ -6601,12 +6606,15 @@ def main(page: ft.Page):
         state["stats_sync_running"] = True
         try:
             while True:
-                await _sync_cross_device_snapshot_once(force=False, refresh_ui=True)
+                try:
+                    await _sync_cross_device_snapshot_once(force=False, refresh_ui=True)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as ex_inner:
+                    log_exception(ex_inner, "main._sync_quiz_stats_loop.cycle")
                 await asyncio.sleep(float(state.get("sync_loop_interval_s") or _QUIZ_STATS_SYNC_INTERVAL_S))
         except asyncio.CancelledError:
             return
-        except Exception as ex:
-            log_exception(ex, "main._sync_quiz_stats_loop")
         finally:
             state["stats_sync_running"] = False
 
@@ -6656,6 +6664,7 @@ def main(page: ft.Page):
                     int((summary or {}).get("total_xp") or 0),
                     int((summary or {}).get("today_questoes") or 0),
                     int((summary or {}).get("today_acertos") or 0),
+                    int((summary or {}).get("streak_dias") or 0),
                 )
                 if state.get("usuario") and int((state["usuario"] or {}).get("id") or 0) == int(local_user_id):
                     state["usuario"]["total_questoes"] = max(
@@ -6669,6 +6678,10 @@ def main(page: ft.Page):
                     state["usuario"]["xp"] = max(
                         int(state["usuario"].get("xp", 0) or 0),
                         int((summary or {}).get("total_xp") or 0),
+                    )
+                    state["usuario"]["streak_dias"] = max(
+                        int(state["usuario"].get("streak_dias", 0) or 0),
+                        int((summary or {}).get("streak_dias") or 0),
                     )
             except Exception as ex_summary:
                 log_exception(ex_summary, "main._sync_subscription_after_login_async.summary")
@@ -6722,6 +6735,15 @@ def main(page: ft.Page):
             state["view_cache"].clear()
             state["route_history"] = []
             state["last_theme"] = state["tema_escuro"]
+            try:
+                if db and usuario and usuario.get("id") and hasattr(db, "registrar_login_diario"):
+                    novo_streak = int(db.registrar_login_diario(int(usuario["id"])) or 0)
+                    state["usuario"]["streak_dias"] = max(
+                        int(state["usuario"].get("streak_dias", 0) or 0),
+                        int(novo_streak or 0),
+                    )
+            except Exception as ex_streak:
+                log_exception(ex_streak, "main.on_login_success.registrar_login_diario")
             state["settings_sync_signature"] = _settings_signature(
                 _normalize_ai_provider(usuario.get("provider") or "gemini"),
                 str(usuario.get("model") or "").strip(),
@@ -6835,6 +6857,55 @@ def main(page: ft.Page):
             log_exception(ex, "main.toggle_dark")
 
 
+    def _is_back_key_event(e: Optional[ft.KeyboardEvent]) -> bool:
+        raw_values = [
+            str(getattr(e, "key", "") or ""),
+            str(getattr(e, "data", "") or ""),
+            str(getattr(e, "name", "") or ""),
+        ]
+        tokens: set[str] = set()
+        for raw in raw_values:
+            txt = re.sub(r"[^a-z0-9]+", " ", str(raw or "").strip().lower()).strip()
+            if not txt:
+                continue
+            tokens.update([part for part in txt.split(" ") if part])
+        if "escape" in tokens:
+            return True
+        if ("go" in tokens and "back" in tokens) or ("browser" in tokens and "back" in tokens):
+            return True
+        if "navigate" in tokens and "back" in tokens:
+            return True
+        if "android" in tokens and "back" in tokens:
+            return True
+        return False
+
+    def _on_keyboard_event(e: ft.KeyboardEvent):
+        if not _is_back_key_event(e):
+            return
+        current_route = _normalize_route_path(page.route or "/home")
+        if current_route in {"/", "/login"}:
+            return
+        if bool(state.get("menu_inline_open")):
+            state["menu_inline_open"] = False
+            route_change(None)
+            return
+        history = state.setdefault("route_history", [])
+        can_go_prev = False
+        for prev in reversed(history):
+            prev_route = _normalize_route_path(prev)
+            if prev_route and prev_route not in {"/", "/login"} and prev_route != current_route:
+                can_go_prev = True
+                break
+        if (not can_go_prev) and current_route in {"/home", "/welcome"}:
+            try:
+                ds_toast(page, "Use Sair no menu para encerrar a sessao.", tipo="info")
+                page.update()
+            except Exception:
+                pass
+            return
+        view_pop(None)
+
+
 
 
     def route_change(e):
@@ -6851,6 +6922,8 @@ def main(page: ft.Page):
                 if route != raw_route:
                     page.go(route)
                     return
+            if route not in {"/", "/login"}:
+                page.on_keyboard_event = _on_keyboard_event
 
             # Login/landing: sem cache
             if route in ("/", "/login"):
@@ -6910,9 +6983,18 @@ def main(page: ft.Page):
                     page.update()
                     return
                 login_view = LoginView(page, db_ref, on_login_success, backend=state.get("backend"))
+                try:
+                    login_view.can_pop = False
+                except Exception:
+                    pass
                 _style_form_controls(login_view, bool(state.get("tema_escuro")))
                 _sanitize_control_texts(login_view)
                 page.views[:] = [login_view]
+                try:
+                    if page.views:
+                        page.views[0].can_pop = False
+                except Exception:
+                    pass
                 page.update()
                 log_event("route", route)
                 log_state("state_after_route")
@@ -6926,6 +7008,11 @@ def main(page: ft.Page):
                 page.go("/home")
                 return
 
+            if state.get("usuario"):
+                try:
+                    _ensure_stats_sync_task()
+                except Exception as ex_ensure:
+                    log_exception(ex_ensure, "main.route_change.ensure_stats_sync_task")
             if route in {"/home", "/stats", "/profile", "/mais", "/settings"}:
                 try:
                     page.run_task(_sync_cross_device_snapshot_once, True, True)
@@ -7006,7 +7093,16 @@ def main(page: ft.Page):
             if page.views and page.views[-1] is view:
                 log_event("route_cached", route)
                 return
+            try:
+                view.can_pop = False
+            except Exception:
+                pass
             page.views[:] = [view]
+            try:
+                if page.views:
+                    page.views[0].can_pop = False
+            except Exception:
+                pass
             page.update()
             log_event("route", route)
             log_state("state_after_route")
@@ -7033,7 +7129,7 @@ def main(page: ft.Page):
             page.go("/home" if state["usuario"] else "/login")
         except Exception as ex:
             log_exception(ex, "main.view_pop")
-            page.go("/login")
+            page.go("/home" if state.get("usuario") else "/login")
 
     def on_resized(e):
         try:
@@ -7065,6 +7161,7 @@ def main(page: ft.Page):
     page.on_route_change = route_change
     state["_theme_refresh_cb"] = route_change
     page.on_view_pop = view_pop
+    page.on_keyboard_event = _on_keyboard_event
     page.on_resized = on_resized
     page.update()
     # Splash e runtime em paralelo para reduzir percepcao de lentidao:

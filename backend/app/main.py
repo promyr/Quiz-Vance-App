@@ -780,6 +780,28 @@ def get_quiz_stats_summary(
     today_questoes = int((today_row.questoes if today_row else 0) or 0)
     today_acertos = int((today_row.acertos if today_row else 0) or 0)
     today_xp = int((today_row.xp_ganho if today_row else 0) or 0)
+    daily_map: dict[date, tuple[int, int]] = {}
+    for row in rows:
+        try:
+            key = row.day_key
+            if not isinstance(key, date):
+                continue
+            daily_map[key] = (
+                max(0, int(row.questoes or 0)),
+                max(0, int(row.acertos or 0)),
+            )
+        except Exception:
+            continue
+    streak_dias = 0
+    day_cursor = today_key
+    while True:
+        today_stats = daily_map.get(day_cursor)
+        if not today_stats:
+            break
+        if int(today_stats[0] or 0) <= 0:
+            break
+        streak_dias += 1
+        day_cursor = day_cursor - timedelta(days=1)
     return schemas.QuizStatsSummaryOut(
         user_id=int(uid),
         total_questoes=max(0, int(total_questoes)),
@@ -788,6 +810,7 @@ def get_quiz_stats_summary(
         today_questoes=max(0, today_questoes),
         today_acertos=max(0, today_acertos),
         today_xp=max(0, today_xp),
+        streak_dias=max(0, int(streak_dias)),
     )
 
 

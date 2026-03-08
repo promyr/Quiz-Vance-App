@@ -1410,32 +1410,37 @@ class Database:
         total_xp: Optional[int] = None,
         today_questoes: Optional[int] = None,
         today_acertos: Optional[int] = None,
+        streak_dias: Optional[int] = None,
     ) -> None:
         conn = self.conectar()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT xp, acertos, total_questoes FROM usuarios WHERE id = ?", (int(user_id),))
+            cursor.execute("SELECT xp, acertos, total_questoes, streak_dias FROM usuarios WHERE id = ?", (int(user_id),))
             row = cursor.fetchone()
             if not row:
                 return
             xp_local = int(row[0] or 0)
             acertos_local = int(row[1] or 0)
             total_local = int(row[2] or 0)
+            streak_local = int(row[3] or 0)
             xp_cloud = int(total_xp or 0) if total_xp is not None else xp_local
             acertos_cloud = int(total_acertos or 0)
             total_cloud = int(total_questoes or 0)
+            streak_cloud = max(0, int(streak_dias or 0)) if streak_dias is not None else streak_local
             cursor.execute(
                 """
                 UPDATE usuarios
                 SET xp = ?,
                     acertos = ?,
-                    total_questoes = ?
+                    total_questoes = ?,
+                    streak_dias = ?
                 WHERE id = ?
                 """,
                 (
                     max(0, max(xp_local, xp_cloud)),
                     max(0, max(acertos_local, acertos_cloud)),
                     max(0, max(total_local, total_cloud)),
+                    max(0, max(streak_local, streak_cloud)),
                     int(user_id),
                 ),
             )
@@ -1616,6 +1621,28 @@ class Database:
         if ultima_data == (hoje - datetime.timedelta(days=1)):
             return max(1, streak_atual + 1)
         return 1
+
+    def registrar_login_diario(self, user_id: int) -> int:
+        """
+        Marca atividade no login e atualiza streak sem depender de resposta.
+        """
+        conn = self.conectar()
+        cursor = conn.cursor()
+        try:
+            novo_streak = self._calcular_streak(cursor, int(user_id))
+            cursor.execute(
+                """
+                UPDATE usuarios
+                SET streak_dias = ?,
+                    ultima_atividade = DATE('now','localtime')
+                WHERE id = ?
+                """,
+                (int(max(1, novo_streak)), int(user_id)),
+            )
+            conn.commit()
+            return int(max(1, novo_streak))
+        finally:
+            conn.close()
 
     def _registrar_progresso_diario_cursor(
         self,

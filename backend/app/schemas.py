@@ -119,3 +119,4 @@ class QuizStatsSummaryOut(BaseModel):
     today_questoes: int = 0
     today_acertos: int = 0
     today_xp: int = 0
+    streak_dias: int = 0

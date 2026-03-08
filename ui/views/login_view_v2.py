@@ -34,6 +34,15 @@ class LoginView(ft.View):
         self._construir_interface()
         self._page.on_keyboard_event = self._on_keyboard_event
 
+    def will_unmount(self):
+        try:
+            current = getattr(self._page, "on_keyboard_event", None)
+            current_owner = getattr(current, "__self__", None)
+            if current_owner is self:
+                self._page.on_keyboard_event = self._prev_keyboard_handler
+        except Exception:
+            pass
+
     def _criar_componentes(self):
         # Login
         self.email_login = ft.TextField(
@@ -493,6 +502,7 @@ class LoginView(ft.View):
                     cloud_xp = int((summary or {}).get("total_xp") or 0)
                     cloud_today_q = int((summary or {}).get("today_questoes") or 0)
                     cloud_today_a = int((summary or {}).get("today_acertos") or 0)
+                    cloud_streak = int((summary or {}).get("streak_dias") or 0)
                     await asyncio.to_thread(
                         self.db.sync_cloud_quiz_totals,
                         local_uid,
@@ -501,10 +511,12 @@ class LoginView(ft.View):
                         cloud_xp,
                         cloud_today_q,
                         cloud_today_a,
+                        cloud_streak,
                     )
                     usuario["total_questoes"] = max(int(usuario.get("total_questoes") or 0), cloud_total)
                     usuario["acertos"] = max(int(usuario.get("acertos") or 0), cloud_acertos)
                     usuario["xp"] = max(int(usuario.get("xp") or 0), cloud_xp)
+                    usuario["streak_dias"] = max(int(usuario.get("streak_dias") or 0), cloud_streak)
             except Exception as ex_stats:
                 log_exception(ex_stats, "login_view._acao_login_async.sync_remote_quiz_stats")
             if migrated_from_local:

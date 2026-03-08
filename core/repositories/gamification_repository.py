@@ -26,8 +26,25 @@ class GamificationRepository:
     def registrar_resposta_quiz_tempo_real(self, user_id: int, correta: bool, xp_por_acerto: int = 10) -> Dict:
         return self.db.registrar_resposta_quiz_tempo_real(user_id, correta, xp_por_acerto)
 
-    def sync_cloud_quiz_totals(self, user_id: int, total_questoes: int, total_acertos: int, total_xp: Optional[int] = None, today_questoes: Optional[int] = None, today_acertos: Optional[int] = None) -> None:
-        self.db.sync_cloud_quiz_totals(user_id, total_questoes, total_acertos, total_xp, today_questoes, today_acertos)
+    def sync_cloud_quiz_totals(
+        self,
+        user_id: int,
+        total_questoes: int,
+        total_acertos: int,
+        total_xp: Optional[int] = None,
+        today_questoes: Optional[int] = None,
+        today_acertos: Optional[int] = None,
+        streak_dias: Optional[int] = None,
+    ) -> None:
+        self.db.sync_cloud_quiz_totals(
+            user_id,
+            total_questoes,
+            total_acertos,
+            total_xp,
+            today_questoes,
+            today_acertos,
+            streak_dias,
+        )
 
     # --- Stats sync queue ---
 

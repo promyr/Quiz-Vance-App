@@ -319,6 +319,80 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(int(progresso.get("acertos") or 0), 7)
         print("âœ… Sync cloud com progresso diario funcionando")
 
+    def test_registrar_login_diario_incrementa_streak(self):
+        """Login diario deve manter/incrementar streak sem responder questao."""
+        from core.database_v2 import Database
+        import sqlite3
+        db = Database(db_path=self.test_db)
+        db.iniciar_banco()
+        ok, _ = db.criar_conta("loginstreak", "loginstreak@test.local", "123456", "01/01/2000")
+        self.assertTrue(ok)
+        user = db.fazer_login("loginstreak@test.local", "123456")
+        uid = int(user["id"])
+
+        conn = sqlite3.connect(self.test_db)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE usuarios
+            SET streak_dias = 2,
+                ultima_atividade = DATE('now','localtime','-1 day')
+            WHERE id = ?
+            """,
+            (uid,),
+        )
+        conn.commit()
+        conn.close()
+
+        novo_streak = db.registrar_login_diario(uid)
+        self.assertEqual(int(novo_streak), 3)
+        resumo = db.obter_resumo_estatisticas(uid)
+        self.assertEqual(int(resumo.get("streak_dias") or 0), 3)
+        print("âœ… Login diario incrementando streak")
+
+    def test_sync_cloud_quiz_totals_merges_streak(self):
+        """Sync cloud deve manter o maior streak entre local e remoto."""
+        from core.database_v2 import Database
+        db = Database(db_path=self.test_db)
+        db.iniciar_banco()
+        ok, _ = db.criar_conta("streaksync", "streaksync@test.local", "123456", "01/01/2000")
+        self.assertTrue(ok)
+        user = db.fazer_login("streaksync@test.local", "123456")
+        uid = int(user["id"])
+
+        # Cria streak local >=1
+        db.registrar_resposta_quiz_tempo_real(uid, True, xp_por_acerto=10)
+        resumo_local = db.obter_resumo_estatisticas(uid)
+        streak_local = int(resumo_local.get("streak_dias") or 0)
+        self.assertGreaterEqual(streak_local, 1)
+
+        # Remoto menor nao pode reduzir streak local
+        db.sync_cloud_quiz_totals(
+            uid,
+            total_questoes=int(resumo_local.get("total_questoes") or 0),
+            total_acertos=int(resumo_local.get("acertos_total") or 0),
+            total_xp=int(resumo_local.get("xp") or 0),
+            today_questoes=1,
+            today_acertos=1,
+            streak_dias=max(0, streak_local - 1),
+        )
+        resumo_after_lower = db.obter_resumo_estatisticas(uid)
+        self.assertEqual(int(resumo_after_lower.get("streak_dias") or 0), streak_local)
+
+        # Remoto maior deve elevar streak local
+        db.sync_cloud_quiz_totals(
+            uid,
+            total_questoes=int(resumo_after_lower.get("total_questoes") or 0),
+            total_acertos=int(resumo_after_lower.get("acertos_total") or 0),
+            total_xp=int(resumo_after_lower.get("xp") or 0),
+            today_questoes=1,
+            today_acertos=1,
+            streak_dias=streak_local + 3,
+        )
+        resumo_after_higher = db.obter_resumo_estatisticas(uid)
+        self.assertEqual(int(resumo_after_higher.get("streak_dias") or 0), streak_local + 3)
+        print("âœ… Sync cloud fazendo merge correto de streak")
+
     def test_save_filter_and_cache_hash(self):
         """Prompt 4: salvar filtros e cache por hash."""
         from core.database_v2 import Database
