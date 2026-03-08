@@ -98,3 +98,8 @@ venv/
 
 # Codex local workspace metadata
 .agents/
+.codex/
+
+# Local runtime/build artifacts
+backend/.local_pgdata/
+.gradle-build-cache/
