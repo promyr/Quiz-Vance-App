@@ -11,6 +11,7 @@ import flet as ft
 from config import CORES, GOOGLE_OAUTH
 from core.auth_service import authenticate_with_google
 from core.error_monitor import log_exception
+from core.helpers.ai_helpers import normalize_ai_provider, provider_api_field
 
 
 class LoginView(ft.View):
@@ -428,15 +429,21 @@ class LoginView(ft.View):
             usuario["premium_until"] = b.get("premium_until")
             try:
                 remote_cfg = await asyncio.to_thread(self.backend.get_user_settings, int(usuario["backend_user_id"]))
-                provider = str(remote_cfg.get("provider") or usuario.get("provider") or "gemini")
+                provider = normalize_ai_provider(str(remote_cfg.get("provider") or usuario.get("provider") or "gemini"))
                 model = str(remote_cfg.get("model") or usuario.get("model") or "gemini-2.5-flash")
-                api_key = remote_cfg.get("api_key", usuario.get("api_key"))
                 economia_mode = bool(remote_cfg.get("economia_mode"))
                 telemetry_opt_in = bool(remote_cfg.get("telemetry_opt_in"))
-                # Restore per-provider keys from backend
-                remote_key_gemini = remote_cfg.get("api_key_gemini")
-                remote_key_openai = remote_cfg.get("api_key_openai")
-                remote_key_groq = remote_cfg.get("api_key_groq")
+                per_provider_keys = {
+                    "gemini": (str(remote_cfg.get("api_key_gemini") or "").strip() or None),
+                    "openai": (str(remote_cfg.get("api_key_openai") or "").strip() or None),
+                    "groq": (str(remote_cfg.get("api_key_groq") or "").strip() or None),
+                }
+                api_key = per_provider_keys.get(provider)
+                if not api_key:
+                    fallback_api = str(remote_cfg.get("api_key") or "").strip()
+                    if fallback_api:
+                        api_key = fallback_api
+                        per_provider_keys[provider] = fallback_api
                 ok_cfg = await asyncio.to_thread(
                     self.db.sync_ai_preferences,
                     int(usuario.get("id") or 0),
@@ -447,38 +454,24 @@ class LoginView(ft.View):
                     telemetry_opt_in,
                 )
                 if ok_cfg:
-                    provider_norm = str(provider or "gemini").strip().lower()
-                    if provider_norm not in {"gemini", "openai", "groq"}:
-                        provider_norm = "gemini"
                     usuario["provider"] = provider
                     usuario["model"] = model
                     usuario["api_key"] = api_key
-                    usuario[f"api_key_{provider_norm}"] = api_key
+                    usuario[provider_api_field(provider)] = api_key
                     usuario["economia_mode"] = 1 if economia_mode else 0
                     usuario["telemetry_opt_in"] = 1 if telemetry_opt_in else 0
-                # Sync per-provider keys into local DB and state
-                per_provider_keys = {}
-                if remote_key_gemini:
-                    per_provider_keys["gemini"] = str(remote_key_gemini).strip()
-                if remote_key_openai:
-                    per_provider_keys["openai"] = str(remote_key_openai).strip()
-                if remote_key_groq:
-                    per_provider_keys["groq"] = str(remote_key_groq).strip()
-                if per_provider_keys:
-                    try:
-                        await asyncio.to_thread(
-                            self.db.atualizar_api_keys,
-                            int(usuario.get("id") or 0),
-                            per_provider_keys,
-                            provider_norm if ok_cfg else None,
-                        )
-                        for p, k in per_provider_keys.items():
-                            usuario[f"api_key_{p}"] = k
-                        # Update active key if missing
-                        if not usuario.get("api_key") and per_provider_keys.get(provider_norm if ok_cfg else "gemini"):
-                            usuario["api_key"] = per_provider_keys.get(provider_norm if ok_cfg else "gemini")
-                    except Exception as ex_keys:
-                        log_exception(ex_keys, "login_view._acao_login_async.sync_per_provider_keys")
+                try:
+                    await asyncio.to_thread(
+                        self.db.atualizar_api_keys,
+                        int(usuario.get("id") or 0),
+                        per_provider_keys,
+                        provider,
+                    )
+                    for p in ("gemini", "openai", "groq"):
+                        usuario[provider_api_field(p)] = per_provider_keys.get(p)
+                    usuario["api_key"] = per_provider_keys.get(provider)
+                except Exception as ex_keys:
+                    log_exception(ex_keys, "login_view._acao_login_async.sync_per_provider_keys")
             except Exception as ex_cfg:
                 log_exception(ex_cfg, "login_view._acao_login_async.sync_remote_settings")
             try:

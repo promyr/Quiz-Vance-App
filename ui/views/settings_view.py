@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from typing import Optional
 
 import flet as ft
@@ -268,6 +270,19 @@ def build_settings_body(state: dict, navigate, dark: bool) -> ft.Control:
                 state["usuario"][provider_api_field(p)] = str(api_keys.get(p) or "").strip() or None
             state["usuario"]["economia_mode"] = 1 if economia_mode_switch.value else 0
             state["usuario"]["telemetry_opt_in"] = 1 if telemetry_opt_in_switch.value else 0
+            sync_keys = {p: (str(api_keys.get(p) or "").strip() or None) for p in _AI_KEY_PROVIDERS}
+            state["settings_sync_signature"] = json.dumps(
+                {
+                    "provider": provider_value,
+                    "model": model_value,
+                    "economia_mode": 1 if economia_mode_switch.value else 0,
+                    "telemetry_opt_in": 1 if telemetry_opt_in_switch.value else 0,
+                    "api_keys": sync_keys,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+            state["last_settings_sync_ts"] = time.monotonic()
 
             backend_ref = state.get("backend")
             b_uid = backend_user_id(state.get("usuario") or {})

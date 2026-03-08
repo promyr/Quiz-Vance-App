@@ -141,6 +141,30 @@ APP_ROUTES_SECONDARY = [
 _AI_KEY_PROVIDERS = ("gemini", "openai", "groq")
 
 
+def _read_env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    txt = str(raw).strip()
+    if not txt:
+        return float(default)
+    try:
+        return float(txt)
+    except Exception:
+        return float(default)
+
+
+_QUIZ_STATS_SYNC_INTERVAL_S = max(
+    8.0,
+    _read_env_float(
+        "QUIZVANCE_STATS_SYNC_INTERVAL_S",
+        _read_env_float("QUIZVANCE_CLOUD_SYNC_INTERVAL_S", 20.0),
+    ),
+)
+_SETTINGS_SYNC_INTERVAL_S = max(8.0, _read_env_float("QUIZVANCE_SETTINGS_SYNC_INTERVAL_S", 20.0))
+_ROUTE_SYNC_MIN_GAP_S = max(2.0, _read_env_float("QUIZVANCE_ROUTE_SYNC_MIN_GAP_S", 6.0))
+
+
 def _normalize_ai_provider(value: str) -> str:
     v = str(value or "").strip().lower()
     return v if v in _AI_KEY_PROVIDERS else "gemini"
@@ -172,6 +196,23 @@ def _resolve_user_api_key(usuario: Optional[dict], provider: Optional[str] = Non
     if not any(bool(v) for v in keys.values()):
         return str(user.get("api_key") or "").strip()
     return ""
+
+
+def _settings_signature(
+    provider: str,
+    model: str,
+    economia_mode: bool,
+    telemetry_opt_in: bool,
+    api_keys: dict[str, Optional[str]],
+) -> str:
+    payload = {
+        "provider": _normalize_ai_provider(provider),
+        "model": str(model or "").strip(),
+        "economia_mode": 1 if bool(economia_mode) else 0,
+        "telemetry_opt_in": 1 if bool(telemetry_opt_in) else 0,
+        "api_keys": {p: (str((api_keys or {}).get(p) or "").strip() or None) for p in _AI_KEY_PROVIDERS},
+    }
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True)
 
 
 def _create_user_ai_service(usuario: dict, force_economic: bool = False) -> Optional[AIService]:
@@ -6803,6 +6844,14 @@ def main(page: ft.Page):
             "route_history": [],
             "async_guard": AsyncActionGuard(),
             "stats_sync_running": False,
+            "stats_sync_inflight": False,
+            "summary_sync_inflight": False,
+            "settings_sync_inflight": False,
+            "sync_loop_interval_s": _QUIZ_STATS_SYNC_INTERVAL_S,
+            "last_summary_sync_ts": 0.0,
+            "last_settings_sync_ts": 0.0,
+            "stats_summary_signature": "",
+            "settings_sync_signature": "",
             "ai_busy_count": 0,
             "ai_busy_message": "",
             "_ai_busy_box_ctl": None,
@@ -6879,91 +6928,218 @@ def main(page: ft.Page):
                 del history[:-80]
         page.go(target_route)
 
-    async def _sync_cloud_quiz_summary_once():
+    async def _sync_cloud_quiz_summary_once(force: bool = False) -> bool:
+        if state.get("summary_sync_inflight"):
+            return False
+        now = time.monotonic()
+        min_gap = _ROUTE_SYNC_MIN_GAP_S * (0.5 if force else 1.0)
+        if (now - float(state.get("last_summary_sync_ts") or 0.0)) < min_gap:
+            return False
         db_ref = state.get("db")
         backend_ref = state.get("backend")
         usuario = state.get("usuario") or {}
         if not db_ref or not backend_ref or not backend_ref.enabled():
-            return
+            return False
         if not usuario or not usuario.get("id"):
-            return
+            return False
         local_uid = int(usuario.get("id") or 0)
         backend_uid = _backend_user_id(usuario)
         if local_uid <= 0 or backend_uid <= 0:
-            return
+            return False
+        state["summary_sync_inflight"] = True
+        state["last_summary_sync_ts"] = now
         try:
-            summary = await asyncio.to_thread(backend_ref.get_quiz_stats_summary, int(backend_uid))
+            summary_raw = await asyncio.to_thread(backend_ref.get_quiz_stats_summary, int(backend_uid))
+            summary = {
+                "total_questoes": int((summary_raw or {}).get("total_questoes") or 0),
+                "total_acertos": int((summary_raw or {}).get("total_acertos") or 0),
+                "total_xp": int((summary_raw or {}).get("total_xp") or 0),
+                "today_questoes": int((summary_raw or {}).get("today_questoes") or 0),
+                "today_acertos": int((summary_raw or {}).get("today_acertos") or 0),
+                "today_xp": int((summary_raw or {}).get("today_xp") or 0),
+            }
             await asyncio.to_thread(
                 db_ref.sync_cloud_quiz_totals,
                 int(local_uid),
-                int((summary or {}).get("total_questoes") or 0),
-                int((summary or {}).get("total_acertos") or 0),
-                int((summary or {}).get("total_xp") or 0),
-                int((summary or {}).get("today_questoes") or 0),
-                int((summary or {}).get("today_acertos") or 0),
+                int(summary.get("total_questoes") or 0),
+                int(summary.get("total_acertos") or 0),
+                int(summary.get("total_xp") or 0),
+                int(summary.get("today_questoes") or 0),
+                int(summary.get("today_acertos") or 0),
             )
+            prev_sig = str(state.get("stats_summary_signature") or "")
+            next_sig = json.dumps(summary, ensure_ascii=True, sort_keys=True)
+            state["stats_summary_signature"] = next_sig
+            changed = next_sig != prev_sig
             if state.get("usuario") and int((state["usuario"] or {}).get("id") or 0) == int(local_uid):
-                state["usuario"]["total_questoes"] = max(
+                prev_local = (
                     int(state["usuario"].get("total_questoes", 0) or 0),
-                    int((summary or {}).get("total_questoes") or 0),
-                )
-                state["usuario"]["acertos"] = max(
                     int(state["usuario"].get("acertos", 0) or 0),
-                    int((summary or {}).get("total_acertos") or 0),
-                )
-                state["usuario"]["xp"] = max(
                     int(state["usuario"].get("xp", 0) or 0),
-                    int((summary or {}).get("total_xp") or 0),
                 )
+                state["usuario"]["total_questoes"] = max(prev_local[0], int(summary.get("total_questoes") or 0))
+                state["usuario"]["acertos"] = max(prev_local[1], int(summary.get("total_acertos") or 0))
+                state["usuario"]["xp"] = max(prev_local[2], int(summary.get("total_xp") or 0))
+                changed = changed or prev_local != (
+                    int(state["usuario"].get("total_questoes", 0) or 0),
+                    int(state["usuario"].get("acertos", 0) or 0),
+                    int(state["usuario"].get("xp", 0) or 0),
+                )
+            return bool(changed)
         except Exception as ex_summary:
             log_exception(ex_summary, "main._sync_cloud_quiz_summary_once")
+            return False
+        finally:
+            state["summary_sync_inflight"] = False
 
-    async def _sync_quiz_stats_once():
+    async def _sync_quiz_stats_once(force_summary: bool = False) -> bool:
+        if state.get("stats_sync_inflight"):
+            return False
         db_ref = state.get("db")
         backend_ref = state.get("backend")
         usuario = state.get("usuario") or {}
         if not db_ref or not backend_ref or not backend_ref.enabled():
-            return
+            return False
         if not usuario or not usuario.get("id"):
-            return
+            return False
         local_uid = int(usuario.get("id") or 0)
         backend_uid = _backend_user_id(usuario)
         if local_uid <= 0 or backend_uid <= 0:
-            return
-        pending = await asyncio.to_thread(db_ref.list_pending_quiz_stats_events, local_uid, 200)
-        if not pending:
-            await _sync_cloud_quiz_summary_once()
-            return
-        events = []
-        event_to_row = {}
-        for item in pending:
-            ev = item.get("event") if isinstance(item, dict) else None
-            if not isinstance(ev, dict):
-                continue
-            eid = str(ev.get("event_id") or item.get("event_id") or "").strip()
-            if not eid:
-                continue
-            ev["event_id"] = eid
-            events.append(ev)
-            event_to_row[eid] = int(item.get("id") or 0)
-        if not events:
+            return False
+        state["stats_sync_inflight"] = True
+        try:
+            pending = await asyncio.to_thread(db_ref.list_pending_quiz_stats_events, local_uid, 200)
+            if not pending:
+                return await _sync_cloud_quiz_summary_once(force=bool(force_summary))
+            events = []
+            event_to_row = {}
+            for item in pending:
+                ev = item.get("event") if isinstance(item, dict) else None
+                if not isinstance(ev, dict):
+                    continue
+                eid = str(ev.get("event_id") or item.get("event_id") or "").strip()
+                if not eid:
+                    continue
+                ev["event_id"] = eid
+                events.append(ev)
+                event_to_row[eid] = int(item.get("id") or 0)
+            if not events:
+                return await _sync_cloud_quiz_summary_once(force=bool(force_summary))
+            try:
+                resp = await asyncio.to_thread(backend_ref.sync_quiz_stats_batch, int(backend_uid), events)
+            except Exception as ex:
+                log_exception(ex, "main._sync_quiz_stats_once.backend")
+                return False
+            consumed = list((resp or {}).get("consumed_event_ids") or [])
+            if not consumed:
+                consumed = [str(ev.get("event_id") or "") for ev in events]
+            delete_ids = [event_to_row.get(str(eid or "").strip(), 0) for eid in consumed]
+            delete_ids = [int(i) for i in delete_ids if int(i or 0) > 0]
+            if delete_ids:
+                try:
+                    await asyncio.to_thread(db_ref.delete_pending_quiz_stats_events, delete_ids)
+                except Exception as ex:
+                    log_exception(ex, "main._sync_quiz_stats_once.delete_queue")
+            return await _sync_cloud_quiz_summary_once(force=True)
+        finally:
+            state["stats_sync_inflight"] = False
+
+    async def _sync_remote_user_settings_once(force: bool = False) -> bool:
+        if state.get("settings_sync_inflight"):
+            return False
+        now = time.monotonic()
+        min_gap = _ROUTE_SYNC_MIN_GAP_S if force else _SETTINGS_SYNC_INTERVAL_S
+        if (now - float(state.get("last_settings_sync_ts") or 0.0)) < min_gap:
+            return False
+        db_ref = state.get("db")
+        backend_ref = state.get("backend")
+        usuario = state.get("usuario") or {}
+        if not db_ref or not backend_ref or not backend_ref.enabled():
+            return False
+        if not usuario or not usuario.get("id"):
+            return False
+        local_uid = int(usuario.get("id") or 0)
+        backend_uid = _backend_user_id(usuario)
+        if local_uid <= 0 or backend_uid <= 0:
+            return False
+        state["settings_sync_inflight"] = True
+        state["last_settings_sync_ts"] = now
+        try:
+            remote_cfg = await asyncio.to_thread(backend_ref.get_user_settings, int(backend_uid))
+            provider = _normalize_ai_provider((remote_cfg or {}).get("provider") or usuario.get("provider") or "gemini")
+            modelos = list(AI_PROVIDERS.get(provider, AI_PROVIDERS["gemini"]).get("models") or [])
+            default_model = str(AI_PROVIDERS.get(provider, AI_PROVIDERS["gemini"]).get("default_model") or (modelos[0] if modelos else "gemini-2.5-flash")).strip()
+            model_raw = str((remote_cfg or {}).get("model") or "").strip()
+            local_model = str((usuario or {}).get("model") or "").strip()
+            model = model_raw or local_model or default_model
+            if modelos and model not in modelos:
+                model = default_model
+            api_keys_remote: dict[str, Optional[str]] = {}
+            for p in _AI_KEY_PROVIDERS:
+                raw = (remote_cfg or {}).get(_provider_api_field(p))
+                txt = str(raw).strip() if raw is not None else ""
+                api_keys_remote[p] = txt or None
+            active_raw = (remote_cfg or {}).get("api_key")
+            active_key = str(active_raw).strip() if active_raw is not None else ""
+            if active_key and not api_keys_remote.get(provider):
+                api_keys_remote[provider] = active_key
+            economia_mode = bool((remote_cfg or {}).get("economia_mode"))
+            telemetry_opt_in = bool((remote_cfg or {}).get("telemetry_opt_in"))
+            remote_sig = _settings_signature(
+                provider,
+                model,
+                economia_mode,
+                telemetry_opt_in,
+                api_keys_remote,
+            )
+            prev_sig = str(state.get("settings_sync_signature") or "")
+            if (not force) and remote_sig == prev_sig:
+                return False
+            await asyncio.to_thread(
+                db_ref.sync_ai_preferences,
+                int(local_uid),
+                provider,
+                model,
+                api_keys_remote.get(provider),
+                bool(economia_mode),
+                bool(telemetry_opt_in),
+            )
+            await asyncio.to_thread(
+                db_ref.atualizar_api_keys,
+                int(local_uid),
+                api_keys_remote,
+                provider,
+            )
+            current = state.get("usuario") or {}
+            if int(current.get("id") or 0) == int(local_uid):
+                current["provider"] = provider
+                current["model"] = model
+                current["api_key"] = api_keys_remote.get(provider)
+                for p in _AI_KEY_PROVIDERS:
+                    current[_provider_api_field(p)] = api_keys_remote.get(p)
+                current["economia_mode"] = 1 if bool(economia_mode) else 0
+                current["telemetry_opt_in"] = 1 if bool(telemetry_opt_in) else 0
+            state["settings_sync_signature"] = remote_sig
+            return remote_sig != prev_sig
+        except Exception as ex_settings:
+            log_exception(ex_settings, "main._sync_remote_user_settings_once")
+            return False
+        finally:
+            state["settings_sync_inflight"] = False
+
+    async def _sync_cross_device_snapshot_once(force: bool = False, refresh_ui: bool = True) -> None:
+        stats_changed = await _sync_quiz_stats_once(force_summary=bool(force))
+        settings_changed = await _sync_remote_user_settings_once(force=bool(force))
+        if not (refresh_ui and (stats_changed or settings_changed)):
             return
         try:
-            resp = await asyncio.to_thread(backend_ref.sync_quiz_stats_batch, int(backend_uid), events)
-        except Exception as ex:
-            log_exception(ex, "main._sync_quiz_stats_once.backend")
-            return
-        consumed = list((resp or {}).get("consumed_event_ids") or [])
-        if not consumed:
-            consumed = [str(ev.get("event_id") or "") for ev in events]
-        delete_ids = [event_to_row.get(str(eid or "").strip(), 0) for eid in consumed]
-        delete_ids = [int(i) for i in delete_ids if int(i or 0) > 0]
-        if delete_ids:
-            try:
-                await asyncio.to_thread(db_ref.delete_pending_quiz_stats_events, delete_ids)
-            except Exception as ex:
-                log_exception(ex, "main._sync_quiz_stats_once.delete_queue")
-        await _sync_cloud_quiz_summary_once()
+            current_route = _normalize_route_path(page.route or "/home")
+            if current_route in {"/home", "/stats", "/profile", "/mais"}:
+                route_change(None)
+            elif current_route == "/settings":
+                page.update()
+        except Exception:
+            pass
 
     async def _sync_quiz_stats_loop():
         if state.get("stats_sync_running"):
@@ -6971,8 +7147,8 @@ def main(page: ft.Page):
         state["stats_sync_running"] = True
         try:
             while True:
-                await asyncio.sleep(180)
-                await _sync_quiz_stats_once()
+                await _sync_cross_device_snapshot_once(force=False, refresh_ui=True)
+                await asyncio.sleep(float(state.get("sync_loop_interval_s") or _QUIZ_STATS_SYNC_INTERVAL_S))
         except asyncio.CancelledError:
             return
         except Exception as ex:
@@ -7092,6 +7268,14 @@ def main(page: ft.Page):
             state["view_cache"].clear()
             state["route_history"] = []
             state["last_theme"] = state["tema_escuro"]
+            state["settings_sync_signature"] = _settings_signature(
+                _normalize_ai_provider(usuario.get("provider") or "gemini"),
+                str(usuario.get("model") or "").strip(),
+                bool(usuario.get("economia_mode")),
+                bool(usuario.get("telemetry_opt_in")),
+                _extract_user_api_keys(usuario),
+            )
+            state["stats_summary_signature"] = ""
             sounds_ref = state.get("sounds")
             if sounds_ref:
                 sounds_ref.play_level_up()
@@ -7132,7 +7316,7 @@ def main(page: ft.Page):
                         log_exception(ex, "main.on_login_success.schedule_plan_sync")
                 try:
                     _ensure_stats_sync_task()
-                    page.run_task(_sync_quiz_stats_once)
+                    page.run_task(_sync_cross_device_snapshot_once, True, True)
                 except Exception as ex:
                     log_exception(ex, "main.on_login_success.schedule_stats_sync")
             log_event("login_success", f"user_id={usuario.get('id')} email={usuario.get('email')}")
@@ -7158,6 +7342,10 @@ def main(page: ft.Page):
         state["usuario"] = None
         state["view_cache"].clear()
         state["route_history"] = []
+        state["settings_sync_signature"] = ""
+        state["stats_summary_signature"] = ""
+        state["last_summary_sync_ts"] = 0.0
+        state["last_settings_sync_ts"] = 0.0
         log_event("logout", "user logout")
         log_state("state_after_logout")
         navigate("/login")
@@ -7282,6 +7470,12 @@ def main(page: ft.Page):
             if route == "/welcome" and _is_premium_active(state.get("usuario") or {}):
                 page.go("/home")
                 return
+
+            if route in {"/home", "/stats", "/profile", "/mais", "/settings"}:
+                try:
+                    page.run_task(_sync_cross_device_snapshot_once, True, True)
+                except Exception as ex_sync:
+                    log_exception(ex_sync, "main.route_change.schedule_cross_device_sync")
 
             dark = state.get("tema_escuro", False)
             # invalida cache se tema mudou
