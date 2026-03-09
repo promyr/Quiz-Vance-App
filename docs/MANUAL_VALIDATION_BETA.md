@@ -5,9 +5,23 @@ Objetivo: validar apenas o que ainda depende de uso manual em app/dispositivo.
 Data: ____/____/______  
 Responsavel: ______________________
 
+## Pre-checagem automatizada concluida
+
+Executado em `2026-03-08` antes do smoke manual:
+
+- [x] `python -m unittest discover -s tests -p "test_*.py" -v` -> `46/46 OK`
+- [x] `python scripts/smoke_go_live.py`
+- [x] `python scripts/smoke_go_live.py --online --backend-url https://quiz-vance-backend.fly.dev`
+- [x] `python scripts/smoke_go_live.py --online --full --backend-url https://quiz-vance-backend.fly.dev`
+
+Observacao:
+- Esta folha fica reservada apenas para o que depende de interacao visual/real em desktop e Android.
+- Se algo falhar aqui, classificar imediatamente como `P0`, `P1` ou `P2`.
+
 ## 1) Preparacao
 
-1. Abrir app atualizado.
+1. Desktop: abrir app atualizado (`python run.py`) e validar login basico.
+2. Android: instalar o APK beta mais recente em dispositivo limpo.
 2. Garantir backend online:
    - `python scripts/smoke_go_live.py --online --backend-url https://quiz-vance-backend.fly.dev`
 3. Entrar com conta real de teste (a mesma que virou premium).
@@ -15,6 +29,7 @@ Responsavel: ______________________
 Resultado esperado:
 - Login normal, sem travar.
 - Conta aparece premium.
+- App abre no desktop e no Android sem crash inicial.
 
 ## 2) Fluxo de compra e plano (manual)
 
@@ -79,6 +94,8 @@ Resultado esperado:
 
 ## 8) Criterio de aprovacao beta
 
+- [ ] Desktop smoke ok
+- [ ] APK em dispositivo limpo ok
 - [ ] Fluxo premium ok
 - [ ] Correcoes de quiz ok
 - [ ] Flashcards continuo ok
@@ -87,3 +104,8 @@ Resultado esperado:
 - [ ] 2 dispositivos ok
 
 Status final: [ ] APROVADO  [ ] REPROVADO
+
+Observacoes / evidencias:
+- Desktop: __________________________________________________________
+- Android: __________________________________________________________
+- P0/P1/P2: _________________________________________________________

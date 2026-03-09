@@ -60,19 +60,48 @@ function Invoke-FletBuild(
     }
 
     # Workaround for cases where Flet returns non-zero but artifact exists.
-    $artifact = if ($platform -eq "apk") {
-        Join-Path $workDir "build\flutter\build\app\outputs\flutter-apk\app-release.apk"
+    $artifactCandidates = if ($platform -eq "apk") {
+        @(
+            (Join-Path $workDir "build\apk\quiz-vance.apk"),
+            (Join-Path $workDir "build\flutter\build\app\outputs\apk\release\app-release.apk"),
+            (Join-Path $workDir "build\flutter\build\app\outputs\flutter-apk\app-release.apk")
+        )
     }
     else {
-        Join-Path $workDir "build\flutter\build\app\outputs\bundle\release\app-release.aab"
+        @(
+            (Join-Path $workDir "build\aab\quiz-vance.aab"),
+            (Join-Path $workDir "build\flutter\build\app\outputs\bundle\release\app-release.aab")
+        )
     }
 
-    if (Test-Path $artifact) {
+    $artifact = $artifactCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($artifact) {
         Write-Warning "Build returned non-zero, but artifact exists: $artifact"
         return
     }
 
     throw "Build failed for $platform"
+}
+
+function Resolve-BuildArtifact(
+    [string]$platform,
+    [string]$workDir
+) {
+    $candidates = if ($platform -eq "apk") {
+        @(
+            (Join-Path $workDir "build\apk\quiz-vance.apk"),
+            (Join-Path $workDir "build\flutter\build\app\outputs\apk\release\app-release.apk"),
+            (Join-Path $workDir "build\flutter\build\app\outputs\flutter-apk\app-release.apk")
+        )
+    }
+    else {
+        @(
+            (Join-Path $workDir "build\aab\quiz-vance.aab"),
+            (Join-Path $workDir "build\flutter\build\app\outputs\bundle\release\app-release.aab")
+        )
+    }
+
+    return $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -204,33 +233,51 @@ $commonArgs += @("--yes")
 
 if ($Target -in @("apk", "both")) {
     Invoke-FletBuild -platform "apk" -buildArgs $commonArgs -workDir $workDir
+    $resolvedApk = Resolve-BuildArtifact -platform "apk" -workDir $workDir
+    if (-not $resolvedApk) {
+        throw "Build finalizado sem localizar o artefato APK esperado."
+    }
+    Write-Host "==> APK gerado em: $resolvedApk"
 }
 
 if ($Target -in @("aab", "both")) {
     Invoke-FletBuild -platform "aab" -buildArgs $commonArgs -workDir $workDir
+    $resolvedAab = Resolve-BuildArtifact -platform "aab" -workDir $workDir
+    if (-not $resolvedAab) {
+        throw "Build finalizado sem localizar o artefato AAB esperado."
+    }
+    Write-Host "==> AAB gerado em: $resolvedAab"
 }
 
 # Copiar artefatos do staging para o projeto raiz.
 if ((-not $NoStaging) -and ($workDir -ne $projectRoot)) {
     if ($Target -in @("apk", "both")) {
-        $srcApk = Join-Path $workDir "build\apk\app-release.apk"
-        if (Test-Path $srcApk) {
-            $dstDir = Join-Path $projectRoot "build\apk"
-            New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
-            Copy-Item $srcApk (Join-Path $dstDir "app-release.apk") -Force
-            $srcSha1 = "$srcApk.sha1"
-            if (Test-Path $srcSha1) {
-                Copy-Item $srcSha1 (Join-Path $dstDir "app-release.apk.sha1") -Force
-            }
+        $srcApk = Resolve-BuildArtifact -platform "apk" -workDir $workDir
+        if (-not $srcApk) {
+            throw "Nao foi possivel localizar o APK no staging para copiar ao projeto raiz."
+        }
+        $dstDir = Join-Path $projectRoot "build\apk"
+        New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
+        $dstApkName = Split-Path -Leaf $srcApk
+        $dstApk = Join-Path $dstDir $dstApkName
+        Copy-Item $srcApk $dstApk -Force
+        Write-Host "==> APK copiado para: $dstApk"
+        $srcSha1 = "$srcApk.sha1"
+        if (Test-Path $srcSha1) {
+            Copy-Item $srcSha1 (Join-Path $dstDir "$dstApkName.sha1") -Force
         }
     }
     if ($Target -in @("aab", "both")) {
-        $srcAab = Join-Path $workDir "build\aab\app-release.aab"
-        if (Test-Path $srcAab) {
-            $dstDir = Join-Path $projectRoot "build\aab"
-            New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
-            Copy-Item $srcAab (Join-Path $dstDir "app-release.aab") -Force
+        $srcAab = Resolve-BuildArtifact -platform "aab" -workDir $workDir
+        if (-not $srcAab) {
+            throw "Nao foi possivel localizar o AAB no staging para copiar ao projeto raiz."
         }
+        $dstDir = Join-Path $projectRoot "build\aab"
+        New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
+        $dstAabName = Split-Path -Leaf $srcAab
+        $dstAab = Join-Path $dstDir $dstAabName
+        Copy-Item $srcAab $dstAab -Force
+        Write-Host "==> AAB copiado para: $dstAab"
     }
 }
 

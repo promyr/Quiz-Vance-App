@@ -5,6 +5,16 @@ Objetivo: validar visualmente a aplicacao em execucao real apos as correcoes.
 Data: ____/____/______  
 Responsavel: ______________________
 
+## Pre-validacao automatizada (2026-03-08)
+
+1. [x] Dependencias cliente/backend normalizadas na `.venv`.
+2. [x] Suite automatizada completa: `46/46` testes OK.
+3. [x] Smoke local (`python run.py`/compile) via `scripts/smoke_go_live.py`.
+4. [x] Smoke online estrito em producao.
+5. [x] Smoke online full em producao.
+6. [x] Toolchain Android validado com `flutter doctor -v`.
+7. [ ] Instalacao do APK em device limpo ainda depende da etapa fisica.
+
 ## Preparacao
 
 1. Executar `python run.py`.
@@ -92,12 +102,14 @@ Responsavel: ______________________
 ## Resultado Final
 
 1. Status final: [ ] APROVADO  [ ] REPROVADO
-2. Bugs encontrados:
+2. Desktop smoke: [ ] OK  [ ] FAIL
+3. Android smoke: [ ] OK  [ ] FAIL
+4. Bugs encontrados:
    - ________________________________________________________________
    - ________________________________________________________________
    - ________________________________________________________________
 
-3. Prioridade de correcao:
+5. Prioridade de correcao:
    - P0: ____________________________________________________________
    - P1: ____________________________________________________________
    - P2: ____________________________________________________________

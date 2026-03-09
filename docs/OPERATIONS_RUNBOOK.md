@@ -1,6 +1,6 @@
 # Quiz Vance - Operations Runbook (Beta)
 
-Atualizado em: 2026-02-27
+Atualizado em: 2026-03-08
 
 ## 1) Ambiente de producao
 
@@ -21,11 +21,14 @@ Atualizado em: 2026-02-27
 2. Saude HTTP:
    - `python scripts/smoke_go_live.py --online --backend-url https://quiz-vance-backend.fly.dev`
 3. Fluxo funcional minimo:
+   - executar `--full` pelo menos 1x por dia util ou sempre que houver mudanca em auth/plans/billing:
    - `python scripts/smoke_go_live.py --online --full --backend-url https://quiz-vance-backend.fly.dev`
 4. Webhook MP:
    - painel Mercado Pago > Webhooks:
      - taxa de entrega >= 99%
      - ultimos eventos `payment.updated` com status `200`.
+5. Sanity check de conta:
+   - se houve atividade de pagamento, abrir uma conta premium de teste e validar estado/plano rapidamente.
 
 ## 3) Observabilidade e logs
 
@@ -49,6 +52,31 @@ Atualizado em: 2026-02-27
    - se OOM persistir: reduzir carga de uso no app temporariamente e subir memoria da VM.
 5. Pos-incidente:
    - registrar horario, causa, acao e resultado.
+
+## 4.1) Rotina pre-release APK
+
+Executar antes de compartilhar qualquer APK beta novo:
+
+1. Suite automatizada:
+   - `python -m unittest discover -s tests -p "test_*.py" -v`
+2. Smoke local:
+   - `python scripts/smoke_go_live.py`
+3. Smoke online full:
+   - `python scripts/smoke_go_live.py --online --full --backend-url https://quiz-vance-backend.fly.dev`
+4. Build Android:
+   - `powershell -ExecutionPolicy Bypass -File .\scripts\build_android.ps1 -Target apk`
+5. Instalacao em device limpo:
+   - instalar o APK mais recente e rodar a trilha curta do beta
+   - login
+   - home
+   - questoes
+   - revisao
+   - flashcards
+   - planos
+   - settings / tema
+6. Gate:
+   - se houver `P0` ou `P1`, nao distribuir o APK
+   - se houver apenas `P2` cosmetico, registrar e seguir com beta controlado
 
 ## 5) Billing e reconciliacao
 
@@ -76,6 +104,17 @@ Atualizado em: 2026-02-27
 - Disponibilidade alvo backend: >= 99%.
 - Tempo de resposta alvo `/health`: p50 < 300ms.
 - Tempo de tratamento de incidente critico: ate 30 min.
+
+## 7.1) Registro minimo de evidencias
+
+Para cada rotina diaria, pre-release ou incidente, registrar:
+
+- data/hora
+- responsavel
+- comandos executados
+- resultado (`OK`, `FAIL`, `WARN`)
+- acao tomada
+- proximo passo
 
 ## 8) Rotacao de segredo interno (manual controlado)
 

@@ -1,6 +1,15 @@
 # Go-live Checklist (Quiz Vance)
 
-Atualizado em: 2026-02-27
+Atualizado em: 2026-03-08
+
+## Validacao automatizada (2026-03-08)
+- [x] Ambiente Python normalizado via `.venv` com dependencias de cliente e backend.
+- [x] Suite automatizada completa: `46/46` testes OK.
+- [x] Smoke local: `python scripts/smoke_go_live.py`.
+- [x] Smoke online estrito: `/health` + `/health/ready` OK em producao.
+- [x] Smoke online full: auth, plans, checkout confirm e usage OK em producao.
+- [x] Toolchain Android validado com `flutter doctor -v` sem pendencias.
+- [x] Script de build Android ajustado para localizar/copiar o artefato atual do Flet (`quiz-vance.apk`) e falhar explicitamente quando o APK nao for localizado.
 
 ## Atualizacoes tecnicas automaticas (2026-02-27)
 - [x] Backend deployado no Fly com tuning de custo:
@@ -33,7 +42,7 @@ Atualizado em: 2026-02-27
 ## 4) Webhook de producao
 - [x] URL do webhook configurada no painel MP:
   - `https://quiz-vance-backend.fly.dev/billing/webhook/mercadopago`
-- [ ] Atualizar URL com token:
+- [x] Atualizar URL com token:
   - `https://quiz-vance-backend.fly.dev/billing/webhook/mercadopago?token=<MP_WEBHOOK_TOKEN>`
 - [x] Teste com notificacao real em producao.
 
@@ -46,14 +55,17 @@ Atualizado em: 2026-02-27
 ## 6) Saude tecnica minima
 - [x] Script de smoke pre-release: `scripts/smoke_go_live.py`.
 - [x] Compilacao/validacao automatizada local.
+- [x] Suite automatizada e smoke online/full executados em 2026-03-08.
 - [ ] Smoke funcional manual no app (login/quiz/flashcards/simulado/plano/biblioteca).
   - guia: `MANUAL_VALIDATION_BETA.md`
+  - status atual: automacao OK; falta validacao visual/interativa em desktop e device.
 - [ ] APK beta instalado em dispositivo limpo.
+  - status atual: toolchain OK; instalacao fisica ainda pendente.
 
 ## 7) Politica comercial e legal
 - [x] Estrutura legal criada em `docs/legal/`.
 - [x] Secao legal/suporte no app (`/mais`) com links configuraveis por env.
-- [ ] Publicar URLs finais de termos/privacidade/reembolso/suporte.
+- [x] Publicar URLs finais de termos/privacidade/reembolso/suporte.
 
 ## 8) Operacao e suporte
 - [x] Script suporte/reconciliacao:
