@@ -104,6 +104,35 @@ function Resolve-BuildArtifact(
     return $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
 
+function Write-BuildMetadata(
+    [string]$artifactPath,
+    [string]$platform,
+    [string]$buildVersion,
+    [string]$buildNumber
+) {
+    if (-not (Test-Path $artifactPath)) {
+        return
+    }
+
+    $artifact = Get-Item $artifactPath
+    $hash = (Get-FileHash $artifact.FullName -Algorithm SHA1).Hash
+    $metadata = [ordered]@{
+        platform = $platform
+        artifact = $artifact.Name
+        artifact_path = $artifact.FullName
+        build_version = $buildVersion
+        build_number = $buildNumber
+        file_size = $artifact.Length
+        last_write_time = $artifact.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")
+        sha1 = $hash
+        generated_at = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    }
+    $metadataPath = "$artifactPath.buildinfo.json"
+    $metadata | ConvertTo-Json | Set-Content -Path $metadataPath -Encoding UTF8
+    Set-Content -Path "$artifactPath.sha1" -Value $hash -Encoding ascii
+    Write-Host "==> Metadados gravados em: $metadataPath"
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = Resolve-Path (Join-Path $scriptDir "..")
 $workDir = $projectRoot
@@ -262,10 +291,7 @@ if ((-not $NoStaging) -and ($workDir -ne $projectRoot)) {
         $dstApk = Join-Path $dstDir $dstApkName
         Copy-Item $srcApk $dstApk -Force
         Write-Host "==> APK copiado para: $dstApk"
-        $srcSha1 = "$srcApk.sha1"
-        if (Test-Path $srcSha1) {
-            Copy-Item $srcSha1 (Join-Path $dstDir "$dstApkName.sha1") -Force
-        }
+        Write-BuildMetadata -artifactPath $dstApk -platform "apk" -buildVersion $BuildVersion -buildNumber $resolvedBuildNumber
     }
     if ($Target -in @("aab", "both")) {
         $srcAab = Resolve-BuildArtifact -platform "aab" -workDir $workDir
@@ -278,6 +304,7 @@ if ((-not $NoStaging) -and ($workDir -ne $projectRoot)) {
         $dstAab = Join-Path $dstDir $dstAabName
         Copy-Item $srcAab $dstAab -Force
         Write-Host "==> AAB copiado para: $dstAab"
+        Write-BuildMetadata -artifactPath $dstAab -platform "aab" -buildVersion $BuildVersion -buildNumber $resolvedBuildNumber
     }
 }
 

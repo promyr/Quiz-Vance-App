@@ -194,6 +194,41 @@ class BackendClient:
             payload,
         )
 
+    def upsert_user_provider_key(
+        self,
+        user_id: int,
+        provider: str,
+        model: str,
+        economia_mode: bool,
+        telemetry_opt_in: bool,
+        target_provider: str,
+        target_api_key: str,
+        active_api_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        def _normalize_provider(value: str) -> str:
+            v = str(value or "").strip().lower()
+            return v if v in {"gemini", "openai", "groq"} else "gemini"
+
+        provider_clean = _normalize_provider(provider)
+        target_clean = _normalize_provider(target_provider)
+        payload: Dict[str, Any] = {
+            "user_id": int(user_id),
+            "provider": provider_clean,
+            "model": str(model or "gemini-2.5-flash").strip(),
+            "economia_mode": bool(economia_mode),
+            "telemetry_opt_in": bool(telemetry_opt_in),
+            f"api_key_{target_clean}": str(target_api_key or "").strip(),
+        }
+        if provider_clean == target_clean:
+            payload["api_key"] = str(
+                active_api_key if active_api_key is not None else target_api_key or ""
+            ).strip()
+        return self._request(
+            "POST",
+            "/internal/user-settings",
+            payload,
+        )
+
     def get_plan(self, user_id: int) -> Dict[str, Any]:
         uid = int(user_id)
         cached = self._get_cached_plan(uid)
@@ -310,6 +345,24 @@ class BackendClient:
         return self._request(
             "GET",
             f"/internal/stats/quiz/summary/{uid}?tz_offset_hours={local_offset_hours}",
+            timeout=self.plan_timeout,
+            retries=1,
+        )
+
+    def ping_daily_activity(self, user_id: int, streak_dias: int | None = None) -> Dict[str, Any]:
+        import time as _time
+        uid = int(user_id)
+        local_offset_hours = round(-_time.timezone / 3600.0, 1) if not _time.daylight else round(-_time.altzone / 3600.0, 1)
+        payload: Dict[str, Any] = {
+            "user_id": uid,
+            "tz_offset_hours": local_offset_hours,
+        }
+        if streak_dias is not None:
+            payload["streak_dias"] = max(0, int(streak_dias or 0))
+        return self._request(
+            "POST",
+            "/internal/stats/activity/ping",
+            payload,
             timeout=self.plan_timeout,
             retries=1,
         )

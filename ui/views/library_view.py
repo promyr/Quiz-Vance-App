@@ -408,24 +408,23 @@ def build_library_body(state: dict, navigate, dark: bool) -> ft.Control:
         expand=True, bgcolor=_color("fundo", dark), padding=20,
         content=ft.Column([
             ds_section_title("Minha Biblioteca", dark=dark),
-            ft.ResponsiveRow(controls=[
-                ft.Container(col={"sm": 6, "md": 3}, content=ds_card(dark=dark, padding=12, content=ft.Column([ft.Text("Arquivos", size=12, color=_color("texto_sec", dark)), files_count_text], spacing=4))),
-                ft.Container(col={"sm": 6, "md": 3}, content=ds_card(dark=dark, padding=12, content=ft.Column([ft.Text("Pacotes", size=12, color=_color("texto_sec", dark)), packs_count_text], spacing=4))),
-            ], spacing=8, run_spacing=8),
-            ds_card(dark=dark, padding=12, content=ft.Column([
+            ds_card(dark=dark, padding=16, content=ft.Column([
                 ft.ResponsiveRow([
-                    ft.Container(col={"xs": 12, "md": 6}, content=ft.Text("Acoes", size=15, weight=ft.FontWeight.W_600, color=_color("texto", dark))),
-                    ft.Container(col={"xs": 12, "md": 6}, alignment=ft.Alignment(1, 0), content=ds_btn_primary("Adicionar PDF", icon=ft.Icons.UPLOAD_FILE, on_click=_upload_click, dark=dark)),
-                ], run_spacing=8, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    ft.Container(col={"xs": 6, "md": 4}, content=ft.Column([ft.Text("Arquivos na base", size=12, color=_color("texto_sec", dark)), files_count_text], spacing=2)),
+                    ft.Container(col={"xs": 6, "md": 4}, content=ft.Column([ft.Text("Pacotes gerados", size=12, color=_color("texto_sec", dark)), packs_count_text], spacing=2)),
+                    ft.Container(col={"xs": 12, "md": 4}, alignment=ft.Alignment(1, 0), content=ds_btn_primary("Adicionar PDF", icon=ft.Icons.UPLOAD_FILE, on_click=_upload_click, dark=dark, expand=True)),
+                ], run_spacing=12, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Row([ft.Container(expand=True, content=status_text), upload_ring], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ], spacing=8)),
+            ], spacing=12)),
+            
             ds_card(dark=dark, padding=12, content=ft.Column([
                 ft.Text("Pacotes de Estudo", size=15, weight=ft.FontWeight.W_600, color=_color("texto", dark)),
-                ft.Container(height=208, content=ft.Column([package_list], scroll=ft.ScrollMode.AUTO)),
+                ft.Container(content=package_list),
             ], spacing=8)),
+            
             ds_card(dark=dark, padding=12, content=ft.Column([
                 ft.Text("Arquivos", size=15, weight=ft.FontWeight.W_600, color=_color("texto", dark)),
-                ft.Container(height=286, content=file_list),
+                ft.Container(content=file_list),
             ], spacing=8)),
-        ], expand=True, spacing=10, scroll=ft.ScrollMode.AUTO),
+        ], expand=True, spacing=14, scroll=ft.ScrollMode.AUTO),
     )

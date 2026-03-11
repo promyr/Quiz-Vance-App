@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from pydantic import BaseModel, Field
 
 
@@ -48,6 +48,20 @@ class CheckoutConfirmIn(BaseModel):
 class CheckoutReconcileIn(BaseModel):
     user_id: int
     checkout_id: str
+
+
+class TelegramProvisionIn(BaseModel):
+    chat_id: int | str
+    set_commands: bool = True
+    pin_messages: bool = True
+    chat_title: str = ""
+    chat_description: str = ""
+    dry_run: bool = False
+
+
+class TelegramWebhookConfigIn(BaseModel):
+    public_base_url: str
+    drop_pending_updates: bool = True
 
 
 class ConsumeUsageIn(BaseModel):
@@ -120,3 +134,11 @@ class QuizStatsSummaryOut(BaseModel):
     today_acertos: int = 0
     today_xp: int = 0
     streak_dias: int = 0
+    last_activity_day: date | None = None
+
+
+class QuizActivityPingIn(BaseModel):
+    user_id: int
+    tz_offset_hours: float = 0.0
+    activity_day: date | None = None
+    streak_dias: int | None = None

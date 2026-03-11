@@ -18,6 +18,10 @@ set BACKEND_PUBLIC_URL=https://quiz-vance-backend.fly.dev
 set FRONTEND_PUBLIC_URL=https://seu-frontend.com
 set MP_ACCESS_TOKEN=APP_USR-xxxxxxxx
 set MP_WEBHOOK_TOKEN=troque-por-um-token-forte
+set TELEGRAM_BOT_TOKEN=123456:ABCDEF
+set TELEGRAM_WEBHOOK_SECRET=telegram-webhook-secret
+set TELEGRAM_COMMUNITY_INVITE_URL=https://t.me/seu_grupo
+set TELEGRAM_DOWNLOAD_URL=https://seu-servidor.com/quiz-vance.apk
 ```
 
 Run:
@@ -53,6 +57,9 @@ Suporte operacional (consulta/reconciliacao):
 python scripts/support_tools.py user --user-id 123
 python scripts/support_tools.py checkout --checkout-id SEU_CHECKOUT_ID
 python scripts/support_tools.py reconcile --checkout-id SEU_CHECKOUT_ID
+python scripts/telegram_setup.py blueprint
+python scripts/telegram_setup.py provision --chat-id -100SEU_CHAT_ID
+python scripts/telegram_setup.py set-webhook --public-base-url https://quiz-vance-backend.fly.dev
 ```
 
 ## Endpoints
@@ -66,6 +73,10 @@ python scripts/support_tools.py reconcile --checkout-id SEU_CHECKOUT_ID
 - `POST /usage/consume`
 - `POST /billing/webhook`
 - `POST /billing/webhook/mercadopago`
+- `GET /telegram/health`
+- `POST /telegram/webhook`
+- `POST /telegram/group/provision`
+- `POST /telegram/webhook/configure`
 
 ## Mercado Pago (automatico)
 
@@ -97,3 +108,13 @@ python scripts/support_tools.py reconcile --checkout-id SEU_CHECKOUT_ID
 - Premium:
   - fast + full model
   - dissertativa unlimited
+
+## Telegram comercial
+
+- O bot exposto ao usuario fica enxuto: `start`, `baixar`, `oferta`, `resultados`, `faq`, `grupo` e `suporte`.
+- O backend ainda aceita aliases operacionais como `planos`, `regras`, `comercial` e `estrategia`.
+- O grupo pode ser provisionado como forum com topicos no padrao comercial: `Atualizacoes`, `Comece aqui`, `Bate-papo`, `Resultados`, `Suporte/Ajuda` e `Feedbacks/Inovacoes`.
+- O backend pode mandar alertas de checkout e pagamento para um chat interno no Telegram.
+- Guia operacional completo: `../docs/TELEGRAM_COMMERCIAL_GROUP.md`
+- Playbook de crescimento: `../docs/TELEGRAM_GROWTH_PLAYBOOK.md`
+- Refresh operacional pronto para postar: `../docs/TELEGRAM_REFRESH_OPERACIONAL.md`

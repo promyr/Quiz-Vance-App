@@ -13,6 +13,7 @@ class User(Base):
     xp: Mapped[int] = mapped_column(Integer, default=0)
     level: Mapped[str] = mapped_column(String(50), default="Bronze")
     streak_days: Mapped[int] = mapped_column(Integer, default=0)
+    last_activity_day: Mapped[date | None] = mapped_column(nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 

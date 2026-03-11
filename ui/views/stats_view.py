@@ -177,7 +177,7 @@ def build_stats_body(state: dict, navigate, dark: bool) -> ft.Control:
                     [
                         ds_badge(f"{int(progresso_diario.get('flashcards_revisados', 0))} flashcards", color=CORES["primaria"]),
                         ds_badge(f"{int(progresso_diario.get('discursivas_corrigidas', 0))} discursivas", color=CORES["acento"]),
-                        ds_badge(f"Streak {int(progresso_diario.get('streak_dias', 0))} dia(s)", color=CORES["warning"]),
+                        ds_badge(f"Sequência {int(progresso_diario.get('streak_dias', 0))} dia(s)", color=CORES["warning"]),
                         ds_badge(f"{int(revisoes_pendentes)} revisoes pendentes", color=CORES["erro"]),
                     ],
                     wrap=True,

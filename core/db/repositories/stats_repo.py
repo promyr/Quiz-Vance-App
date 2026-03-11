@@ -234,12 +234,15 @@ class StatsRepository:
         total_xp: Optional[int] = None,
         today_questoes: Optional[int] = None,
         today_acertos: Optional[int] = None,
+        streak_dias: Optional[int] = None,
+        last_activity_day: Optional[str] = None,
     ) -> None:
         conn = self._conectar()
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "SELECT xp, acertos, total_questoes FROM usuarios WHERE id = ?", (int(user_id),)
+                "SELECT xp, acertos, total_questoes, streak_dias, ultima_atividade FROM usuarios WHERE id = ?",
+                (int(user_id),),
             )
             row = cursor.fetchone()
             if not row:
@@ -247,13 +250,37 @@ class StatsRepository:
             xp_local = int(row[0] or 0)
             acertos_local = int(row[1] or 0)
             total_local = int(row[2] or 0)
+            streak_local = int(row[3] or 0)
+            ultima_local = str(row[4] or "").strip()[:10]
             xp_cloud = int(total_xp or 0) if total_xp is not None else xp_local
+            streak_cloud = max(0, int(streak_dias or 0)) if streak_dias is not None else streak_local
+
+            def _norm_day(value: Optional[str]) -> Optional[str]:
+                txt = str(value or "").strip()[:10]
+                if len(txt) != 10:
+                    return None
+                try:
+                    datetime.datetime.strptime(txt, "%Y-%m-%d")
+                except Exception:
+                    return None
+                return txt
+
+            merged_last_activity = _norm_day(ultima_local)
+            cloud_last_activity = _norm_day(last_activity_day)
+            if cloud_last_activity and ((not merged_last_activity) or (cloud_last_activity > merged_last_activity)):
+                merged_last_activity = cloud_last_activity
+            if cloud_last_activity and merged_last_activity == cloud_last_activity:
+                merged_streak = streak_cloud
+            else:
+                merged_streak = streak_local
             cursor.execute(
-                "UPDATE usuarios SET xp = ?, acertos = ?, total_questoes = ? WHERE id = ?",
+                "UPDATE usuarios SET xp = ?, acertos = ?, total_questoes = ?, streak_dias = ?, ultima_atividade = ? WHERE id = ?",
                 (
                     max(0, max(xp_local, xp_cloud)),
                     max(0, max(acertos_local, int(total_acertos or 0))),
                     max(0, max(total_local, int(total_questoes or 0))),
+                    max(0, int(merged_streak)),
+                    merged_last_activity,
                     int(user_id),
                 ),
             )

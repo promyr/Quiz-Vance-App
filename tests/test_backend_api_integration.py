@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Testes de integracao HTTP para API de billing."""
+"""Testes de integracao HTTP para API de billing e atividade diaria."""
 
 import os
 import unittest
+from datetime import date, timedelta
 from unittest.mock import patch
 
 try:
@@ -189,6 +190,115 @@ class BackendAPIIntegrationTest(unittest.TestCase):
             self.assertEqual(total, 1)
         finally:
             db.close()
+
+    def test_daily_activity_ping_updates_summary_streak(self):
+        uid, token = self._register_user(email="activity@test.local")
+        headers = self._auth_headers(token)
+        ontem = (date.today() - timedelta(days=1)).isoformat()
+        hoje = date.today().isoformat()
+
+        ping_ontem = self.client.post(
+            "/internal/stats/activity/ping",
+            headers=headers,
+            json={"user_id": uid, "activity_day": ontem, "streak_dias": 4},
+        )
+        self.assertEqual(ping_ontem.status_code, 200, ping_ontem.text)
+        self.assertEqual(int(ping_ontem.json().get("streak_dias") or 0), 4)
+        self.assertEqual(str(ping_ontem.json().get("last_activity_day") or ""), ontem)
+
+        ping_hoje = self.client.post(
+            "/internal/stats/activity/ping",
+            headers=headers,
+            json={"user_id": uid, "activity_day": hoje},
+        )
+        self.assertEqual(ping_hoje.status_code, 200, ping_hoje.text)
+        self.assertEqual(int(ping_hoje.json().get("streak_dias") or 0), 5)
+        self.assertEqual(str(ping_hoje.json().get("last_activity_day") or ""), hoje)
+
+        summary = self.client.get(
+            f"/internal/stats/quiz/summary/{uid}?tz_offset_hours=0",
+            headers=headers,
+        )
+        self.assertEqual(summary.status_code, 200, summary.text)
+        body = summary.json()
+        self.assertEqual(int(body.get("streak_dias") or 0), 5)
+        self.assertEqual(str(body.get("last_activity_day") or ""), hoje)
+
+    def test_summary_prefers_daily_activity_over_stored_streak_hint(self):
+        uid, token = self._register_user(email="summary-streak@test.local")
+        headers = self._auth_headers(token)
+        hoje = date.today()
+        ontem = hoje - timedelta(days=1)
+
+        db = self.Session()
+        try:
+            user = db.query(models.User).filter(models.User.id == uid).first()
+            self.assertIsNotNone(user)
+            user.streak_days = 9
+            user.last_activity_day = hoje
+            db.add(models.QuizStatsDaily(user_id=uid, day_key=ontem, questoes=3, acertos=2, xp_ganho=20))
+            db.commit()
+        finally:
+            db.close()
+
+        summary = self.client.get(
+            f"/internal/stats/quiz/summary/{uid}?tz_offset_hours=0",
+            headers=headers,
+        )
+        self.assertEqual(summary.status_code, 200, summary.text)
+        body = summary.json()
+        self.assertEqual(int(body.get("streak_dias") or 0), 0)
+        self.assertEqual(str(body.get("last_activity_day") or ""), str(hoje))
+
+    def test_user_settings_preserve_all_provider_keys_and_allow_partial_clear(self):
+        uid, token = self._register_user(email="keys@test.local")
+        headers = self._auth_headers(token)
+
+        save_all = self.client.post(
+            "/internal/user-settings",
+            headers=headers,
+            json={
+                "user_id": uid,
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "api_key": "gem-key-123",
+                "api_key_gemini": "gem-key-123",
+                "api_key_openai": "open-key-456",
+                "api_key_groq": "groq-key-789",
+                "economia_mode": False,
+                "telemetry_opt_in": False,
+            },
+        )
+        self.assertEqual(save_all.status_code, 200, save_all.text)
+
+        after_save = self.client.get(f"/internal/user-settings/{uid}", headers=headers)
+        self.assertEqual(after_save.status_code, 200, after_save.text)
+        saved_body = after_save.json()
+        self.assertEqual(str(saved_body.get("api_key_gemini") or ""), "gem-key-123")
+        self.assertEqual(str(saved_body.get("api_key_openai") or ""), "open-key-456")
+        self.assertEqual(str(saved_body.get("api_key_groq") or ""), "groq-key-789")
+
+        clear_openai = self.client.post(
+            "/internal/user-settings",
+            headers=headers,
+            json={
+                "user_id": uid,
+                "provider": "gemini",
+                "model": "gemini-2.5-flash",
+                "api_key": "gem-key-123",
+                "api_key_openai": "",
+                "economia_mode": False,
+                "telemetry_opt_in": False,
+            },
+        )
+        self.assertEqual(clear_openai.status_code, 200, clear_openai.text)
+
+        after_clear = self.client.get(f"/internal/user-settings/{uid}", headers=headers)
+        self.assertEqual(after_clear.status_code, 200, after_clear.text)
+        clear_body = after_clear.json()
+        self.assertEqual(str(clear_body.get("api_key_gemini") or ""), "gem-key-123")
+        self.assertFalse(clear_body.get("api_key_openai"))
+        self.assertEqual(str(clear_body.get("api_key_groq") or ""), "groq-key-789")
 
 
 if __name__ == "__main__":

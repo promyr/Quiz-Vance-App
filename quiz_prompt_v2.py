@@ -17,33 +17,45 @@ from typing import Any, Optional
 
 
 _MAX_PERGUNTA = 280
-_MAX_OPCAO = 90
-_MAX_EXPLIC = 190
+_MAX_EXPLIC = 185
 _MAX_SUBTEMA = 60
 _MAX_TRECHO = 6000
 _MIN_CHUNK = 300
+
+_TIPOS_QUESTAO = ("SITUACIONAL", "COMPARATIVA", "APLICACAO", "EXCECAO", "CONCEITUAL")
+
+_CRITICIDADES = ("ALTA", "MEDIA", "BAIXA")
+
+
+def _distribuicao_criticidade(qtd: int) -> str:
+    if qtd <= 2:
+        return "ALTA=1, MEDIA=1"
+    alta = max(1, qtd // 3)
+    media = max(1, qtd // 3)
+    baixa = max(0, qtd - alta - media)
+    return f"ALTA={alta}, MEDIA={media}, BAIXA={baixa}"
 
 
 _NIVEL: dict[str, tuple[str, str]] = {
     "iniciante": (
         "INICIANTE",
-        "Conceito basico e direto; distratores simples erram um detalhe objetivo.",
+        "Perguntas diretas sobre conceitos basicos. Alternativas erradas contem erros claros.",
     ),
     "facil": (
         "FACIL",
-        "Conceito central direto; distratores erram um detalhe concreto.",
+        "Perguntas sobre conceitos fundamentais. Alternativas erradas trocam um detalhe especifico.",
     ),
     "intermediario": (
         "INTERMEDIARIO",
-        "Exija relacao causa-efeito ou aplicacao de conceito; distratores invertem a logica.",
+        "Perguntas que exigem entender relacoes entre conceitos ou aplicar regras a situacoes.",
     ),
     "dificil": (
         "DIFICIL",
-        "Questao-problema com multiplas etapas; distratores sao parcialmente corretos.",
+        "Perguntas com situacoes praticas que exigem analise. Alternativas erradas sao parcialmente corretas.",
     ),
     "mestre": (
         "MESTRE",
-        "Caso tecnico de alto nivel com interpretacoes plausiveis, sem distratores absurdos.",
+        "Casos complexos com multiplas interpretacoes plausiveis. Exige dominio profundo do tema.",
     ),
 }
 
@@ -78,8 +90,11 @@ _PROPER_RE = re.compile(r"\b(?:[A-Z][a-z]{3,}(?:\s+[A-Z][a-z]{3,}){0,2})\b")
 
 def _build_system_prompt() -> str:
     return (
-        "Voce e um elaborador senior de questoes para concursos brasileiros de alto nivel. "
-        "Retorne apenas JSON valido, sem markdown e sem texto fora do JSON."
+        "Voce e o motor de questoes do Quiz Vance, um app brasileiro de estudo para concursos.\n"
+        "Seu trabalho: receber um material e gerar questoes objetivas de multipla escolha.\n"
+        "Responda SOMENTE com um array JSON. Comece com [ e termine com ].\n"
+        "Nunca inclua markdown, explicacoes fora do JSON, ou campos extras.\n"
+        "Nunca pergunte sobre autor, editora, ano, ISBN, sumario ou estrutura do documento."
     )
 
 
@@ -93,7 +108,7 @@ def _normalize_level(dificuldade: str) -> tuple[str, str]:
 
 def _prepare_trecho(chunks: list[str], tema: str, max_chars: int = _MAX_TRECHO) -> str:
     if not chunks:
-        return f"Tema: {tema}. Elabore questoes tecnicas sobre este assunto."
+        return f"Tema: {tema}. Elabore questoes sobre este assunto."
 
     cleaned = [str(c).strip() for c in chunks if str(c).strip()]
     if not cleaned:
@@ -121,7 +136,7 @@ def _prepare_trecho(chunks: list[str], tema: str, max_chars: int = _MAX_TRECHO) 
     split_at = max(trecho.rfind(". "), trecho.rfind("; "), trecho.rfind(": "))
     if split_at > int(safe_max * 0.75):
         trecho = trecho[: split_at + 1]
-    return trecho + "\n[...material truncado para caber no contexto...]"
+    return trecho + "\n[...truncado...]"
 
 
 def _extract_subtema_anchors(chunks: list[str], max_items: int = 10) -> list[str]:
@@ -187,8 +202,10 @@ def _build_quiz_prompt(
     nivel_label, nivel_instrucao = _normalize_level(dificuldade)
     trecho = _prepare_trecho(list(chunks or []), str(tema or ""), _MAX_TRECHO)
     subtemas = _extract_subtema_anchors(list(chunks or []), max_items=min(12, max(4, quantidade * 2)))
+    has_content = bool(chunks and any(str(c).strip() for c in chunks))
 
-    historico_block = ""
+    # Bloco de questoes a evitar
+    evitar_block = ""
     if evitar:
         itens = []
         for q in evitar[:20]:
@@ -196,55 +213,49 @@ def _build_quiz_prompt(
             if txt:
                 itens.append(f"- {txt[:160]}")
         if itens:
-            historico_block = "\nHISTORICO - nao recrie nem parafraseie estas perguntas:\n" + "\n".join(itens) + "\n"
+            evitar_block = "\nJa usadas (nao repita):\n" + "\n".join(itens) + "\n"
 
+    # Subtemas extraidos do material
     subtema_block = ""
     if subtemas:
-        subtema_block = "\nSUBTEMAS DISPONIVEIS (priorize variedade):\n" + "\n".join(f"- {s}" for s in subtemas) + "\n"
+        subtema_block = "Subtemas: " + ", ".join(subtemas) + ".\n"
 
+    # Variacao de posicao da correta
     offset = (pagina_int - 1) % 4
     indices_seq = ", ".join(str((offset + i) % 4) for i in range(quantidade))
-    sample_index = (offset + 2) % 4
+    sample_idx = (offset) % 4
+
+    # Retorno vazio so quando tem PDF
+    vazio = "\nSe o material nao tiver conteudo tecnico util, retorne []." if has_content else ""
 
     prompt = textwrap.dedent(
         f"""
-        MATERIAL DE ESTUDO (LOTE {pagina_int}):
+        Gere {quantidade} questoes de multipla escolha sobre o conteudo abaixo.
+
         {trecho}
 
-        TEMA: {tema}
-        NIVEL: {nivel_label}
-        Gere EXATAMENTE {quantidade} questao(oes) novas.
-        {subtema_block}{historico_block}
-        REGRAS OBRIGATORIAS:
-        1. Use somente o material acima. Nunca invente fatos externos.
-        2. Perguntas autonomas: proibido usar "segundo o texto", "conforme o trecho" ou similar.
-        3. Proibido decoreba ("O que e X?"). Exija raciocinio, comparacao ou aplicacao.
-        4. Ignore metadados (autor, ISBN, editora, edicao, datas, sumario, codigos).
-        5. Distratores plausiveis: conceito real do material, mas aplicado em contexto errado.
-        6. Varie subtemas entre questoes; evite concentrar tudo no mesmo ponto.
-        7. Varie correta_index conforme sequencia sugerida: [{indices_seq}].
-        8. Se nao houver base suficiente, retorne [].
-
-        INSTRUCAO DE NIVEL:
+        Tema: {tema}
+        Dificuldade: {nivel_label}
         {nivel_instrucao}
+        {subtema_block}{evitar_block}
+        Requisitos:
+        - Enunciado claro e autonomo (sem mencionar "o texto", "o autor", "o trecho").
+        - 4 alternativas plausiveis. A correta deve ser a unica inequivocamente certa.
+        - Nao pergunte sobre metadados (autor, editora, ano, capitulo, sumario).
+        - Varie a posicao da resposta correta: [{indices_seq}].
+        - Cada questao sobre um aspecto diferente do conteudo.{vazio}
 
-        LIMITES DE FORMATO:
-        - pergunta: max {_MAX_PERGUNTA} chars
-        - subtema: max {_MAX_SUBTEMA} chars
-        - opcoes: lista com EXATAMENTE 4 itens, max {_MAX_OPCAO} chars cada, sem prefixos "A)", "1."
-        - correta_index: inteiro 0-3
-        - explicacao: max {_MAX_EXPLIC} chars
-
-        Retorne APENAS JSON valido, sem markdown e sem texto adicional:
-        [
-          {{
-            "pergunta": "Enunciado tecnico e autonomo",
-            "subtema": "Conceito-chave",
-            "opcoes": ["Opcao correta", "Distrator 1", "Distrator 2", "Distrator 3"],
-            "correta_index": {sample_index},
-            "explicacao": "Razao objetiva da resposta correta."
-          }}
-        ]
+        Formato — array JSON, comece direto com [
+        Exemplo de 1 item:
+        [{{
+          "pergunta": "Em caso de posse sem exercicio no prazo, a nomeacao sera:",
+          "subtema": "Posse",
+          "opcoes": ["Tornada sem efeito", "Anulada", "Convertida", "Suspensa"],
+          "correta_index": {sample_idx},
+          "explicacao": "A nomeacao e tornada sem efeito por falta de exercicio.",
+          "criticidade": "MEDIA",
+          "tipo": "APLICACAO"
+        }}]
         """
     ).strip()
     return prompt
@@ -289,26 +300,22 @@ def validate_question(q: dict) -> bool:
         if not isinstance(q, dict):
             return False
         pergunta = str(q.get("pergunta") or "").strip()
-        if not pergunta or len(pergunta) > (_MAX_PERGUNTA + 40):
+        if not pergunta or len(pergunta) > (_MAX_PERGUNTA + 120):
             return False
-        if _REF_MATERIAL_RE.search(pergunta):
-            return False
-        if _DECOREBA_RE.match(pergunta):
-            return False
+        # Referencia ao material e um sinal ruim, mas nao fatal
+        # _REF_MATERIAL_RE agora nao rejeita — sanitize trunca depois
 
         opcoes = q.get("opcoes") or []
-        if not isinstance(opcoes, list) or len(opcoes) != 4:
+        if not isinstance(opcoes, list) or len(opcoes) < 3:
             return False
 
         normalized_options: list[str] = []
         for raw in opcoes[:4]:
             text = _OPTION_PREFIX_RE.sub("", str(raw or "")).strip()
             if not text:
-                return False
-            if len(text) > (_MAX_OPCAO + 20):
-                return False
+                continue
             normalized_options.append(text.lower())
-        if len(set(normalized_options)) != 4:
+        if len(set(normalized_options)) < 3:
             return False
 
         try:
@@ -335,7 +342,7 @@ def sanitize_question(q: dict) -> dict:
     if isinstance(raw_options, list):
         for raw in raw_options[:4]:
             text = _OPTION_PREFIX_RE.sub("", str(raw or "")).strip()
-            opcoes.append(text[:_MAX_OPCAO])
+            opcoes.append(text)
 
     try:
         cidx = int(str(q.get("correta_index")).strip())

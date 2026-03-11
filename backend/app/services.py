@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import time
+from typing import Optional
 from sqlalchemy.orm import Session
 from . import models
 
@@ -154,6 +155,59 @@ def premium_active(row: models.UserPlan | None) -> bool:
     if premium_until.tzinfo is None or premium_until.tzinfo.utcoffset(premium_until) is None:
         premium_until = premium_until.replace(tzinfo=timezone.utc)
     return premium_until > datetime.now(timezone.utc)
+
+
+def apply_user_daily_activity(
+    user: models.User | None,
+    activity_day: date | None,
+    streak_hint: Optional[int] = None,
+) -> tuple[int, date | None]:
+    if user is None or not isinstance(activity_day, date):
+        return 0, None
+
+    current_streak = max(0, int(getattr(user, "streak_days", 0) or 0))
+    last_day = getattr(user, "last_activity_day", None)
+    if not isinstance(last_day, date):
+        last_day = None
+    hint = max(0, int(streak_hint or 0)) if streak_hint is not None else 0
+
+    if last_day is None:
+        next_day = activity_day
+        next_streak = max(1, current_streak, hint)
+    elif activity_day < last_day:
+        next_day = last_day
+        next_streak = max(current_streak, hint)
+    elif activity_day == last_day:
+        next_day = last_day
+        next_streak = max(1, current_streak, hint)
+    elif activity_day == (last_day + timedelta(days=1)):
+        next_day = activity_day
+        next_streak = max(1, current_streak + 1, hint)
+    else:
+        next_day = activity_day
+        next_streak = max(1, hint)
+
+    user.last_activity_day = next_day
+    user.streak_days = max(0, int(next_streak))
+    return int(user.streak_days or 0), user.last_activity_day
+
+
+def merge_user_daily_activity(
+    db: Session,
+    user_id: int,
+    activity_day: date | None,
+    streak_hint: Optional[int] = None,
+    *,
+    commit: bool = True,
+) -> tuple[int, date | None]:
+    user = db.query(models.User).filter(models.User.id == int(user_id)).first()
+    if not user or not isinstance(activity_day, date):
+        return 0, None
+    streak, last_day = apply_user_daily_activity(user, activity_day, streak_hint)
+    if commit:
+        db.commit()
+        db.refresh(user)
+    return streak, last_day
 
 
 def plan_duration_days(plan_code: str) -> int:

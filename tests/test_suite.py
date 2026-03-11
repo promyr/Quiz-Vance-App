@@ -319,8 +319,8 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(int(progresso.get("acertos") or 0), 7)
         print("âœ… Sync cloud com progresso diario funcionando")
 
-    def test_registrar_login_diario_incrementa_streak(self):
-        """Login diario deve manter/incrementar streak sem responder questao."""
+    def test_registrar_login_diario_nao_incrementa_streak(self):
+        """Login diario nao deve contar como atividade computada para a streak."""
         from core.database_v2 import Database
         import sqlite3
         db = Database(db_path=self.test_db)
@@ -345,14 +345,15 @@ class TestDatabase(unittest.TestCase):
         conn.close()
 
         novo_streak = db.registrar_login_diario(uid)
-        self.assertEqual(int(novo_streak), 3)
+        self.assertEqual(int(novo_streak), 2)
         resumo = db.obter_resumo_estatisticas(uid)
-        self.assertEqual(int(resumo.get("streak_dias") or 0), 3)
-        print("âœ… Login diario incrementando streak")
+        self.assertEqual(int(resumo.get("streak_dias") or 0), 2)
+        print("âœ… Login diario nao incrementando streak")
 
-    def test_sync_cloud_quiz_totals_merges_streak(self):
-        """Sync cloud deve manter o maior streak entre local e remoto."""
+    def test_sync_cloud_quiz_totals_usa_ancora_remota_quando_mais_recente(self):
+        """Sync cloud deve respeitar a ancora de atividade mais recente para a streak."""
         from core.database_v2 import Database
+        import datetime
         db = Database(db_path=self.test_db)
         db.iniciar_banco()
         ok, _ = db.criar_conta("streaksync", "streaksync@test.local", "123456", "01/01/2000")
@@ -375,11 +376,12 @@ class TestDatabase(unittest.TestCase):
             today_questoes=1,
             today_acertos=1,
             streak_dias=max(0, streak_local - 1),
+            last_activity_day=(datetime.date.today() - datetime.timedelta(days=1)).isoformat(),
         )
         resumo_after_lower = db.obter_resumo_estatisticas(uid)
         self.assertEqual(int(resumo_after_lower.get("streak_dias") or 0), streak_local)
 
-        # Remoto maior deve elevar streak local
+        # Remoto mais recente deve atualizar a streak local
         db.sync_cloud_quiz_totals(
             uid,
             total_questoes=int(resumo_after_lower.get("total_questoes") or 0),
@@ -388,10 +390,80 @@ class TestDatabase(unittest.TestCase):
             today_questoes=1,
             today_acertos=1,
             streak_dias=streak_local + 3,
+            last_activity_day=datetime.date.today().isoformat(),
         )
         resumo_after_higher = db.obter_resumo_estatisticas(uid)
         self.assertEqual(int(resumo_after_higher.get("streak_dias") or 0), streak_local + 3)
-        print("âœ… Sync cloud fazendo merge correto de streak")
+        print("âœ… Sync cloud respeitando ancora correta de streak")
+
+    def test_sync_cloud_quiz_totals_restores_last_activity_for_new_device(self):
+        """Instalacao nova deve continuar streak remoto apenas apos atividade computada no novo dia."""
+        from core.database_v2 import Database
+        import datetime
+        db = Database(db_path=self.test_db)
+        db.iniciar_banco()
+        user = db.sync_cloud_user(
+            backend_user_id=999,
+            email="tabletstreak@test.local",
+            nome="Tablet Streak",
+        )
+        self.assertIsNotNone(user)
+        uid = int(user["id"])
+
+        ontem = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        db.sync_cloud_quiz_totals(
+            uid,
+            total_questoes=80,
+            total_acertos=60,
+            total_xp=500,
+            today_questoes=0,
+            today_acertos=0,
+            streak_dias=4,
+            last_activity_day=ontem,
+        )
+
+        novo_streak = db.registrar_login_diario(uid)
+        self.assertEqual(int(novo_streak), 4)
+        delta = db.registrar_resposta_quiz_tempo_real(uid, True, xp_por_acerto=10)
+        self.assertEqual(int(delta.get("streak_dias") or 0), 5)
+        resumo = db.obter_resumo_estatisticas(uid)
+        self.assertEqual(int(resumo.get("streak_dias") or 0), 5)
+        print("âœ… Sync cloud restaurando ancora e continuando apenas com atividade real")
+
+    def test_sync_cloud_user_preserves_local_last_activity(self):
+        """Sync do perfil cloud nao deve sobrescrever a ancora local do streak para hoje."""
+        from core.database_v2 import Database
+        import sqlite3
+        import datetime
+        db = Database(db_path=self.test_db)
+        db.iniciar_banco()
+        ok, _ = db.criar_conta("cloudanchor", "cloudanchor@test.local", "123456", "01/01/2000")
+        self.assertTrue(ok)
+        user = db.fazer_login("cloudanchor@test.local", "123456")
+        uid = int(user["id"])
+        ontem = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+
+        conn = sqlite3.connect(self.test_db)
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE usuarios SET streak_dias = 4, ultima_atividade = ? WHERE id = ?",
+            (ontem, uid),
+        )
+        conn.commit()
+        conn.close()
+
+        synced = db.sync_cloud_user(backend_user_id=777, email="cloudanchor@test.local", nome="Cloud Anchor")
+        self.assertIsNotNone(synced)
+        resumo = db.obter_resumo_estatisticas(uid)
+        self.assertEqual(int(resumo.get("streak_dias") or 0), 4)
+
+        conn = sqlite3.connect(self.test_db)
+        cur = conn.cursor()
+        cur.execute("SELECT ultima_atividade FROM usuarios WHERE id = ?", (uid,))
+        row = cur.fetchone()
+        conn.close()
+        self.assertEqual(str(row[0] or ""), ontem)
+        print("âœ… Sync cloud user preservando ultima atividade local")
 
     def test_save_filter_and_cache_hash(self):
         """Prompt 4: salvar filtros e cache por hash."""

@@ -35,6 +35,7 @@ class GamificationRepository:
         today_questoes: Optional[int] = None,
         today_acertos: Optional[int] = None,
         streak_dias: Optional[int] = None,
+        last_activity_day: Optional[str] = None,
     ) -> None:
         self.db.sync_cloud_quiz_totals(
             user_id,
@@ -44,6 +45,7 @@ class GamificationRepository:
             today_questoes,
             today_acertos,
             streak_dias,
+            last_activity_day,
         )
 
     # --- Stats sync queue ---

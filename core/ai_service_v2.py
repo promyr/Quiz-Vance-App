@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 ServiÃ§o de AI Multi-Provider (Gemini + OpenAI)
 Suporta Google Gemini e OpenAI GPT
@@ -145,6 +145,8 @@ class GeminiProvider(AIProvider):
             if "limit: 0" in msg or "perday" in msg or "per day" in msg:
                 return "quota_hard"
             return "quota_soft"
+        if "404" in msg or "model_not_found" in msg or "does not exist" in msg:
+            return "auth"
         if "timeout" in msg or "temporar" in msg or "unavailable" in msg:
             return "transient"
         return "other"
@@ -243,6 +245,8 @@ class OpenAIProvider(AIProvider):
             return "quota_hard"
         if "401" in msg or "unauthorized" in msg or "invalid api key" in msg:
             return "auth"
+        if "404" in msg or "model_not_found" in msg or "does not exist" in msg:
+            return "auth"
         if "timeout" in msg or "temporar" in msg or "unavailable" in msg:
             return "transient"
         return "other"
@@ -285,6 +289,8 @@ class GroqProvider(AIProvider):
         if "rate limit" in msg or "quota" in msg or "429" in msg:
             return "quota_soft"
         if "401" in msg or "unauthorized" in msg or "invalid api key" in msg:
+            return "auth"
+        if "404" in msg or "model_not_found" in msg or "does not exist" in msg:
             return "auth"
         if "timeout" in msg or "temporar" in msg or "unavailable" in msg:
             return "transient"
@@ -1214,6 +1220,7 @@ class AIService:
         Gera varias questoes em uma unica chamada para reduzir latencia/custo.
         """
         quantidade = max(1, min(10, int(quantity or 1)))
+        qtd_candidatas = min(12, quantidade + 2)
         tentativas = max(1, int(retries or 1))
         contexto = self._build_quiz_context(content, topic)
         if not contexto:
@@ -1242,7 +1249,7 @@ class AIService:
                     chunks=prompt_chunks,
                     tema=str(topic or ""),
                     dificuldade=str(difficulty or ""),
-                    qtd=quantidade,
+                    qtd=qtd_candidatas,
                     pagina=prompt_page,
                     evitar=(itens_bloqueio or None),
                 )
@@ -1256,55 +1263,37 @@ class AIService:
         if not prompt:
             avoid_block = ""
             if itens_bloqueio:
-                avoid_block = "HISTORICO - nao recrie nem parafraseie estas perguntas:\n"
+                avoid_block = "NAO repita nem parafraseie:\n"
                 avoid_block += "\n".join(f"- {item}" for item in itens_bloqueio)
                 avoid_block += "\n"
 
-            # Instrucao de profundidade por nivel
             _nivel_map = {
-                "facil":         "FACIL: conceito central direto; distratores erram um detalhe concreto.",
-                "medio":         "INTERMEDIARIO: exija relacao causa-efeito ou aplicacao do conceito; distratores invertem a logica.",
-                "intermediario": "INTERMEDIARIO: exija relacao causa-efeito ou aplicacao do conceito; distratores invertem a logica.",
-                "dificil":       "DIFICIL: questao-problema com raciocinio de multiplas etapas; distratores sao conclusoes parcialmente corretas.",
+                "facil":         "Perguntas sobre conceitos fundamentais. Alternativas erradas trocam um detalhe.",
+                "medio":         "Perguntas que exigem entender relacoes entre conceitos ou aplicar regras.",
+                "intermediario": "Perguntas que exigem entender relacoes entre conceitos ou aplicar regras.",
+                "dificil":       "Situacoes praticas que exigem analise. Alternativas parcialmente corretas.",
             }
             nivel_instrucao = _nivel_map.get(str(difficulty or "").lower(), _nivel_map["intermediario"])
 
-            # Sequencia sugerida de correta_index para evitar vies posicional
             idx_offset = (prompt_page - 1) % 4
             indices_seq = ", ".join(str((idx_offset + i) % 4) for i in range(quantidade))
             sample_index = (idx_offset + 2) % 4
 
-            prompt = f"""Voce e um elaborador senior de questoes para concursos publicos brasileiros de alto nivel (CESPE, FCC, VUNESP).
+            prompt = f"""Quiz Vance — motor de questoes para app de estudo.
+Responda SOMENTE com JSON. Comece com [
 
 {contexto}
 {avoid_block}
-Nivel: {nivel_instrucao}
-Gere EXATAMENTE {quantidade} questao(oes) novas.
+Gere {qtd_candidatas} questoes de multipla escolha.
+Dificuldade: {nivel_instrucao}
 
-REGRAS OBRIGATORIAS:
-1. Use exclusivamente o conteudo do material acima. Nunca invente fatos externos.
-2. Perguntas autonomas: proibido usar "segundo o texto", "conforme o trecho" ou similar.
-3. Proibido decoreba ("O que e X?"). Exija raciocinio, comparacao ou aplicacao.
-4. Ignore metadados do material (autor, ISBN, editora, edicao, datas, sumario, codigos de curso).
-5. Cada distrator deve usar conceito real do material, mas aplicado no contexto errado.
-6. Varie os valores de correta_index - sequencia sugerida: [{indices_seq}].
-7. Se nao houver base suficiente no texto, retorne [].
+Requisitos:
+- Enunciado autonomo, sem referenciar o material.
+- 4 alternativas plausiveis.
+- Nao pergunte sobre autor, editora, ano, sumario.
+- Varie correta_index: [{indices_seq}].
 
-LIMITES DE CARACTERES (ultrapassar causa descarte):
-- "pergunta"   : max 280 chars
-- cada "opcoes": max 90 chars, SEM prefixos "A)" "B)" etc.
-- "explicacao" : max 190 chars
-
-Retorne APENAS JSON valido, sem markdown, sem texto antes ou depois:
-[
-  {{
-    "pergunta": "Enunciado tecnico e direto",
-    "subtema": "Subtema curto",
-    "opcoes": ["Opcao correta", "Distrator 1", "Distrator 2", "Distrator 3"],
-    "correta_index": {sample_index},
-    "explicacao": "Razao objetiva da resposta correta."
-  }}
-]
+Exemplo: [{{"pergunta": "...", "subtema": "...", "opcoes": ["A","B","C","D"], "correta_index": {sample_index}, "explicacao": "...", "criticidade": "MEDIA", "tipo": "APLICACAO"}}]
 """
 
         for attempt in range(tentativas):
@@ -1424,26 +1413,39 @@ Retorne APENAS JSON valido, sem markdown, sem texto antes ou depois:
         tentativas = max(1, int(retries or 1))
         texto_amostra = self._select_source_snippets(content, topic=None, max_items=4, max_chars=6000)
 
-        prompt = f"""
-Gere {quantidade} flashcards do texto abaixo.
+        prompt = f"""Voce e elaborador senior de material de estudo para concursos publicos.
+Responda SOMENTE com um array JSON valido, sem markdown, sem texto extra.
+Schema de cada objeto:
+{{frente: string, verso: string}}.
 
-REGRAS DE FOCO:
-- Use estritamente o conteudo do texto abaixo.
-- Nao invente topicos fora do material.
-- Se o texto nao trouxer base suficiente, retorne [].
-- Nao gere flashcards sobre metadados do documento (autor, elaborador, edicao, capa, codigo de guia).
-- Nao gere flashcards sobre estrutura editorial (capitulo, secao, anexo, classificacao/publicacao/manual, codigos como EMA/CIAA).
+Limites de caracteres:
+frente<=200, verso<=400.
 
-IMPORTANTE: Responda APENAS com JSON vÃ¡lido, sem texto adicional.
+Crie EXATAMENTE {quantidade} flashcards baseados EXCLUSIVAMENTE no texto abaixo.
 
-Formato JSON obrigatÃ³rio:
-[
-  {{"frente": "Pergunta ou conceito...", "verso": "Resposta ou explicaÃ§Ã£o..."}},
-  {{"frente": "...", "verso": "..."}}
-]
+REGRAS:
+(1) Cada flashcard deve abordar um topico diferente do texto.
+(2) Proibido decoreba puro ("O que e X?", "Defina X"). Priorize associacoes, comparacoes, aplicacoes praticas e consequencias.
+(3) A frente deve ser uma pergunta ou proposicao que exija raciocinio, nao apenas memorizacao.
+(4) O verso deve conter a resposta completa e objetiva, com explicacao sucinta.
+(5) Use estritamente o conteudo do texto. Nao invente fatos externos.
+(6) Nao gere flashcards sobre metadados do documento (autor, elaborador, edicao, capa, codigo de guia, capitulo, secao, anexo).
+(7) Se nao houver base suficiente, retorne [].
+(8) Evite iniciar a frente com "O que e", "Qual e o objetivo", "Qual e a funcao", "Defina" ou "Conceitue".
+
+Priorize:
+- Comparacoes entre conceitos proximos
+- Consequencias praticas e excecoes
+- Estudos de caso curtos
+- Sequencias e hierarquias
 
 Texto:
 {texto_amostra}
+
+Retorne APENAS JSON valido:
+[
+  {{"frente": "Pergunta ou proposicao...", "verso": "Resposta ou explicacao..."}}
+]
 """
 
         for attempt in range(tentativas):
@@ -1539,28 +1541,38 @@ Texto:
         tema_hint = str(topic or "").strip()
         tema_bloco = f"\nTema declarado pelo usuario: {tema_hint}\n" if tema_hint else ""
 
-        prompt = f"""
-Crie 1 pergunta dissertativa de nível {difficulty}, em português brasileiro.
+        prompt = f"""Voce e elaborador senior de provas dissertativas para concursos publicos.
+Responda SOMENTE com um objeto JSON valido, sem markdown, sem texto extra.
+Schema: {{pergunta: string, resposta_esperada: string}}.
+
+Limites de caracteres:
+pergunta<=300, resposta_esperada<=600.
+
+Crie 1 pergunta dissertativa de nivel {difficulty}, em portugues brasileiro.
 
 REGRAS:
-- Use ortografia correta com acentuação e cedilha.
-- Mantenha o texto natural e claro para estudantes brasileiros.
-- Baseie-se no texto fornecido, sem inventar fatos fora da referência.
-- Use o material anexado como fonte principal e obrigatória.
-- Nao gere pergunta sobre metadados/estrutura editorial do documento (autor, edicao, capitulo, sumario, codigo de manual/publicacao).
-- A pergunta deve cobrar conteudo conceitual do tema, nao informacoes administrativas do arquivo.
+(1) Baseie-se exclusivamente no texto fornecido, sem inventar fatos fora da referencia.
+(2) Use ortografia correta com acentuacao e cedilha.
+(3) A pergunta deve exigir analise, comparacao, aplicacao ou argumentacao — proibido pedir definicao pura.
+(4) Nao gere pergunta sobre metadados/estrutura editorial do documento (autor, edicao, capitulo, sumario, codigo de manual/publicacao).
+(5) A pergunta deve cobrar conteudo conceitual do tema, nao informacoes administrativas do arquivo.
+(6) Evite iniciar com "O que e", "Defina", "Conceitue", "Qual e o objetivo".
+(7) A resposta esperada deve ser um modelo claro com os pontos-chave que o aluno deveria abordar.
 
-IMPORTANTE: Responda APENAS com JSON válido, sem texto adicional.
+Priorize perguntas que exijam:
+- Comparacao entre conceitos proximos
+- Analise de consequencias praticas
+- Aplicacao de regras a situacoes concretas
+- Argumentacao com base em evidencias do texto
+{tema_bloco}
+Texto:
+{texto_amostra}
 
-Formato JSON obrigatório:
+Retorne APENAS JSON valido:
 {{
   "pergunta": "Pergunta dissertativa...",
   "resposta_esperada": "Resposta modelo esperada..."
 }}
-{tema_bloco}
-
-Texto:
-{texto_amostra}
 """
         
         tentativas = max(1, int(retries or 1))

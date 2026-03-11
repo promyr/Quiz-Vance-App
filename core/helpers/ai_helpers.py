@@ -39,6 +39,48 @@ def extract_user_api_keys(usuario: Optional[dict]) -> dict[str, str]:
     return keys
 
 
+def resolve_available_provider_keys(usuario: Optional[dict], db: Optional[Any] = None) -> dict[str, str]:
+    user = usuario or {}
+    keys = extract_user_api_keys(user)
+    user_id = 0
+    try:
+        user_id = int(user.get("id") or 0)
+    except Exception:
+        user_id = 0
+
+    if db is not None and user_id > 0:
+        getter = getattr(db, "obter_api_keys_ia", None)
+        if callable(getter):
+            try:
+                db_keys = getter(int(user_id)) or {}
+                for p in _AI_KEY_PROVIDERS:
+                    txt = str(db_keys.get(p) or "").strip()
+                    if txt:
+                        keys[p] = txt
+            except Exception as ex:
+                log_exception(ex, "ai_helpers.resolve_available_provider_keys")
+    return keys
+
+
+def resolve_provider_switch_options(
+    usuario: Optional[dict],
+    db: Optional[Any] = None,
+    current_provider: Optional[str] = None,
+) -> list[tuple[str, str]]:
+    user = usuario or {}
+    current = normalize_ai_provider(current_provider or user.get("provider") or "gemini")
+    keys = resolve_available_provider_keys(user, db=db)
+    options: list[tuple[str, str]] = []
+    for provider in _AI_KEY_PROVIDERS:
+        if provider == current:
+            continue
+        if not str(keys.get(provider) or "").strip():
+            continue
+        provider_name = str(AI_PROVIDERS.get(provider, {}).get("name") or provider.capitalize())
+        options.append((provider, provider_name))
+    return options
+
+
 def resolve_user_api_key(usuario: Optional[dict], provider: Optional[str] = None) -> str:
     user = usuario or {}
     provider_key = normalize_ai_provider(provider or user.get("provider") or "gemini")

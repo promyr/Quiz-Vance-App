@@ -1,4 +1,4 @@
-﻿import time
+import time
 import asyncio
 import os
 import re
@@ -13,7 +13,8 @@ from core.helpers.ui_helpers import screen_width, screen_height, build_focus_hea
 from core.ui_route_theme import _normalize_route_path
 from core.helpers.ai_helpers import (
     create_user_ai_service,
-    extract_user_api_keys,
+    resolve_available_provider_keys,
+    resolve_provider_switch_options,
     provider_api_field,
     is_ai_quota_exceeded,
     ai_issue_kind,
@@ -976,7 +977,8 @@ def build_quiz_body(state, navigate, dark: bool):
             return
         if bool(estado.get("prefetch_inflight")):
             return
-        if len(questoes) - int(current_idx) > 2:
+        prefetch_batch_size = max(1, int(estado.get("infinite_batch_size") or 5))
+        if len(questoes) - int(current_idx) > prefetch_batch_size:
             return
         estado["prefetch_inflight"] = True
         try:
@@ -1436,31 +1438,12 @@ def build_quiz_body(state, navigate, dark: bool):
         if not estado.get("simulado_mode") and idx in estado["confirmados"]:
             is_corrigido = True
 
-        alternativas = list(pergunta.get("alternativas") or [])
-        for i, alt in enumerate(alternativas):
-            fill_color = CORES["primaria"]
-            opacity = 1.0
-            if is_corrigido and selected is not None:
-                if i == correta_idx:
-                    fill_color = CORES["sucesso"]
-                elif i == selected and i != correta_idx:
-                    fill_color = CORES["erro"]
-                else:
-                    opacity = 0.55
-            option_text = " ".join(str(alt or "").replace("\r", "\n").split())
-            wrap_width = 30 if sw < 520 else (42 if sw < 760 else 58)
-            option_text = textwrap.fill(
-                option_text,
-                width=wrap_width,
-                break_long_words=False,
-                break_on_hyphens=False,
-            )
-            options.append(ft.Radio(value=str(i), label=option_text, fill_color=fill_color, opacity=opacity))
-
         def _on_change(e):
             if estado["corrigido"] or idx in estado["confirmados"] or _is_skipped_question(idx):
                 return
             valor = getattr(e.control, "value", None)
+            if valor in (None, ""):
+                valor = getattr(e.control, "data", None)
             if valor in (None, ""):
                 valor = getattr(e, "data", None)
             try:
@@ -1476,6 +1459,54 @@ def build_quiz_body(state, navigate, dark: bool):
             _rebuild_cards()
             if page:
                 page.update()
+
+        alternativas = list(pergunta.get("alternativas") or [])
+        for i, alt in enumerate(alternativas):
+            fill_color = CORES["primaria"]
+            opacity = 1.0
+            if is_corrigido and selected is not None:
+                if i == correta_idx:
+                    fill_color = CORES["sucesso"]
+                elif i == selected and i != correta_idx:
+                    fill_color = CORES["erro"]
+                else:
+                    opacity = 0.55
+            option_text = " ".join(str(alt or "").replace("\r", "\n").split())
+            bg_color = ft.Colors.TRANSPARENT
+            border_color = _color("borda", dark)
+            is_selected = (selected == i)
+            if is_selected:
+                border_color = CORES["primaria"]
+                bg_color = CORES["primaria"] + "11"
+            
+            if is_corrigido and selected is not None:
+                if i == correta_idx:
+                    border_color = CORES["sucesso"]
+                    bg_color = CORES["sucesso"] + "11"
+                elif i == selected and i != correta_idx:
+                    border_color = CORES["erro"]
+                    bg_color = CORES["erro"] + "11"
+
+            opt_container = ft.Container(
+                content=ft.Row(
+                    [
+                        ft.Radio(value=str(i), fill_color=fill_color),
+                        ft.Text(option_text, expand=True, size=15, color=_color("texto", dark), weight=ft.FontWeight.W_500 if is_selected else ft.FontWeight.NORMAL)
+                    ],
+                    alignment=ft.MainAxisAlignment.START,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                border_radius=8,
+                border=ft.border.all(1.5 if is_selected else 1, border_color),
+                bgcolor=bg_color,
+                opacity=opacity,
+                data=str(i),
+                on_click=_on_change,
+                ink=True,
+                disabled=estado.get("corrigido") or idx in estado.get("confirmados", set())
+            )
+            options.append(opt_container)
 
         header_badges = []
         if idx in estado["favoritas"]:
@@ -1662,11 +1693,11 @@ def build_quiz_body(state, navigate, dark: bool):
 
         nav_controls = [
             ft.Container(
-                col={"xs": 6, "md": 3},
+                col={"xs": 4, "md": 3},
                 content=ds_btn_secondary(prev_label, icon=ft.Icons.CHEVRON_LEFT, on_click=_prev_question, dark=dark, expand=True),
             ),
             ft.Container(
-                col={"xs": 6, "md": 3},
+                col={"xs": 4, "md": 3},
                 content=ds_btn_secondary(
                     next_label,
                     icon=ft.Icons.CHEVRON_RIGHT,
@@ -1680,7 +1711,7 @@ def build_quiz_body(state, navigate, dark: bool):
             nav_controls.insert(
                 1,
                 ft.Container(
-                    col={"xs": 6, "md": 3},
+                    col={"xs": 4, "md": 3},
                     content=ds_btn_secondary(
                         "Pular",
                         icon=ft.Icons.SKIP_NEXT,
@@ -1693,7 +1724,7 @@ def build_quiz_body(state, navigate, dark: bool):
             )
             nav_controls.append(
                 ft.Container(
-                    col={"xs": 6, "md": 3},
+                    col={"xs": 12, "md": 3},
                     content=ds_btn_primary(
                         confirm_label,
                         icon=ft.Icons.CHECK_CIRCLE,
@@ -1852,17 +1883,8 @@ def build_quiz_body(state, navigate, dark: bool):
         _sync_resultado_box_visibility()
 
     def _provider_switch_options() -> list[tuple[str, str]]:
-        keys = extract_user_api_keys(user)
-        current_provider = str(user.get("provider") or "gemini").strip().lower()
-        options: list[tuple[str, str]] = []
-        for p in ("gemini", "openai", "groq"):
-            if p == current_provider:
-                continue
-            if not str(keys.get(p) or "").strip():
-                continue
-            provider_name = str(AI_PROVIDERS.get(p, {}).get("name") or p.capitalize())
-            options.append((p, provider_name))
-        return options
+        current_user = state.get("usuario") if isinstance(state.get("usuario"), dict) else user
+        return resolve_provider_switch_options(current_user, db=db)
 
     def _switch_provider_and_retry(provider_key: str):
         try:
@@ -1874,19 +1896,24 @@ def build_quiz_body(state, navigate, dark: bool):
             current_model = str(user.get("model") or "").strip()
             fallback_model = str(cfg.get("default_model") or (model_candidates[0] if model_candidates else current_model)).strip()
             next_model = current_model if current_model in model_candidates else fallback_model
-            keys = extract_user_api_keys(user)
+            current_user = state.get("usuario") if isinstance(state.get("usuario"), dict) else user
+            keys = resolve_available_provider_keys(current_user, db=db)
             active_key = str(keys.get(selected) or "").strip() or None
             user["provider"] = selected
             if next_model:
                 user["model"] = next_model
             user["api_key"] = active_key
-            user[provider_api_field(selected)] = active_key
+            for provider_name in ("gemini", "openai", "groq"):
+                provider_value = str(keys.get(provider_name) or "").strip() or None
+                user[provider_api_field(provider_name)] = provider_value
             if isinstance(state.get("usuario"), dict):
                 state["usuario"]["provider"] = selected
                 if next_model:
                     state["usuario"]["model"] = next_model
                 state["usuario"]["api_key"] = active_key
-                state["usuario"][provider_api_field(selected)] = active_key
+                for provider_name in ("gemini", "openai", "groq"):
+                    provider_value = str(keys.get(provider_name) or "").strip() or None
+                    state["usuario"][provider_api_field(provider_name)] = provider_value
             if db and user.get("id") and hasattr(db, "atualizar_provider_ia"):
                 db.atualizar_provider_ia(int(user["id"]), selected, next_model or fallback_model)
             state["last_settings_sync_ts"] = time.monotonic()
@@ -1900,7 +1927,10 @@ def build_quiz_body(state, navigate, dark: bool):
                 if int(backend_uid or 0) <= 0:
                     return
                 try:
-                    current_keys = extract_user_api_keys(user)
+                    current_keys = resolve_available_provider_keys(
+                        state.get("usuario") if isinstance(state.get("usuario"), dict) else user,
+                        db=db,
+                    )
                     await asyncio.to_thread(
                         backend_ref.upsert_user_settings,
                         int(backend_uid),
@@ -1933,7 +1963,7 @@ def build_quiz_body(state, navigate, dark: bool):
         try:
             if not page:
                 return
-            batch_size = int(estado.get("infinite_batch_size") or 5) if estado.get("simulado_infinite") else 1
+            batch_size = max(1, int(estado.get("infinite_batch_size") or 5))
             filtro = estado.get("ultimo_filtro") or {}
             topic = (filtro.get("topic") or "").strip()
             referencia = filtro.get("referencia") or []
@@ -1946,59 +1976,60 @@ def build_quiz_body(state, navigate, dark: bool):
                 await asyncio.sleep(float(gen_profile["delay_s"]))
             if is_ai_quota_exceeded(service):
                 return
-            attempts = 0
-            max_attempts = max(12, batch_size * 6)
-            while len(novas) < batch_size and attempts < max_attempts:
-                attempts += 1
+            # Gerar batch inteiro em 1 chamada (evita loop lento)
+            if service and (topic or referencia):
                 avoid_snippets = [
                     " ".join(str((q.get("enunciado") or q.get("pergunta") or "")).split())[:220]
                     for q in (questoes[-24:] if isinstance(questoes, list) else [])
                     if str(q.get("enunciado") or q.get("pergunta") or "").strip()
                 ]
-                nova = None
-                if service and (topic or referencia):
+                for _attempt in range(2):
                     try:
-                        questao = await asyncio.to_thread(
-                            service.generate_quiz,
+                        batch = await asyncio.to_thread(
+                            service.generate_quiz_batch,
                             referencia or None,
                             topic or None,
                             DIFICULDADES.get(difficulty_key, {}).get("nome", "Intermediario"),
-                            1,
+                            batch_size,
+                            2,
                             avoid_snippets,
                         )
-                        qnorm = _normalize_question_for_ui(questao) if questao else None
-                        if qnorm and (not _looks_like_material_metadata_question(qnorm)):
-                            nova = qnorm
-                            if db:
-                                try:
-                                    tema_cache = topic or "Geral"
-                                    db.salvar_questao_cache(tema_cache, difficulty_key, qnorm)
-                                except Exception as ex:
-                                    log_exception(ex, "main._build_quiz_body.prefetch.salvar_questao_cache")
+                        if batch:
+                            for questao in batch:
+                                qnorm = _normalize_question_for_ui(questao) if questao else None
+                                if qnorm and (not _looks_like_material_metadata_question(qnorm)):
+                                    novas.append(dict(qnorm))
+                                    questoes.append(dict(qnorm))
+                                    if db:
+                                        try:
+                                            db.salvar_questao_cache(topic or "Geral", difficulty_key, qnorm)
+                                        except Exception as ex:
+                                            log_exception(ex, "main._build_quiz_body.prefetch.salvar_questao_cache")
+                            if novas:
+                                break
                     except Exception as ex:
                         log_exception(ex, "main._build_quiz_body.prefetch")
                         if is_ai_quota_exceeded(service):
                             break
-                if not nova and (not strict_material_source) and topic and db:
-                    try:
-                        cached = db.listar_questoes_cache(topic, difficulty_key, 3)
-                        cached = [
-                            q for q in (_normalize_question_for_ui(x) for x in cached)
-                            if q and (not _looks_like_material_metadata_question(q))
-                        ]
-                        if cached:
-                            nova = cached[0]
-                    except Exception as ex:
-                        log_exception(ex, "main._build_quiz_body.prefetch.cache")
-                if not nova and (not strict_material_source):
+            # Fallback: cache ou defaults
+            if not novas and (not strict_material_source) and topic and db:
+                try:
+                    cached = db.listar_questoes_cache(topic, difficulty_key, batch_size)
+                    for x in cached:
+                        qnorm = _normalize_question_for_ui(x)
+                        if qnorm and (not _looks_like_material_metadata_question(qnorm)):
+                            novas.append(dict(qnorm))
+                            questoes.append(dict(qnorm))
+                            if len(novas) >= batch_size:
+                                break
+                except Exception as ex:
+                    log_exception(ex, "main._build_quiz_body.prefetch.cache")
+            if not novas and (not strict_material_source):
+                for _ in range(min(batch_size, len(DEFAULT_QUIZ_QUESTIONS))):
                     fallback = random.choice(DEFAULT_QUIZ_QUESTIONS)
                     if not _looks_like_material_metadata_question(fallback):
-                        nova = fallback
-                if not nova and strict_material_source:
-                    break
-                if nova:
-                    questoes.append(dict(nova))
-                    novas.append(dict(nova))
+                        novas.append(dict(fallback))
+                        questoes.append(dict(fallback))
             if novas:
                 msg_prefix = "Modo continuo"
                 set_feedback_text(status_text, f"{msg_prefix}: +{len(novas)} questoes prontas ({len(questoes)} total).", "info")
@@ -2453,7 +2484,7 @@ def build_quiz_body(state, navigate, dark: bool):
             estado["modo_continuo"] = modo_continuo
             estado["simulado_infinite"] = infinite_mode
             estado["infinite_batch_size"] = 5 if infinite_mode else estado.get("infinite_batch_size", 5)
-            quantidade = 5 if infinite_mode else (3 if modo_continuo else int(dropdown_val))
+            quantidade = 5 if infinite_mode else (5 if modo_continuo else int(dropdown_val))
             quantidade = max(1, quantidade if infinite_mode else min(30, quantidade))
         except ValueError:
             quantidade = 10
@@ -3388,8 +3419,11 @@ def build_quiz_body(state, navigate, dark: bool):
         estado["show_secondary_tools"] = False
         estado["stats_synced_idxs"] = set()
         estado["ui_stage"] = "config"
+        estado["prefetch_inflight"] = False
+        estado["modo_continuo"] = False
         _reset_mock_exam_runtime(clear_mode=True)
         status_text.value = ""
+        status_estudo.value = ""
         carregando.visible = False
         resultado.value = ""
         _sync_resultado_box_visibility()
@@ -3580,7 +3614,7 @@ def build_quiz_body(state, navigate, dark: bool):
                         ft.ResponsiveRow(
                             [
                                 ft.Container(
-                                    col={"xs": 12, "md": 4},
+                                    col={"xs": 12, "md": 6},
                                     content=ds_btn_primary(
                                         "Treino rapido",
                                         icon=ft.Icons.PLAY_CIRCLE_FILL,
@@ -3590,21 +3624,11 @@ def build_quiz_body(state, navigate, dark: bool):
                                     ),
                                 ),
                                 ft.Container(
-                                    col={"xs": 12, "md": 4},
+                                    col={"xs": 12, "md": 6},
                                     content=ds_btn_secondary(
                                         "Revisar erros",
                                         icon=ft.Icons.AUTO_FIX_HIGH,
                                         on_click=_quick_due_reviews,
-                                        expand=True,
-                                        dark=dark,
-                                    ),
-                                ),
-                                ft.Container(
-                                    col={"xs": 12, "md": 4},
-                                    content=ds_btn_secondary(
-                                        "Modo prova",
-                                        icon=ft.Icons.TIMER,
-                                        on_click=_quick_simulado,
                                         expand=True,
                                         dark=dark,
                                     ),

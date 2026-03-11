@@ -503,6 +503,7 @@ class LoginView(ft.View):
                     cloud_today_q = int((summary or {}).get("today_questoes") or 0)
                     cloud_today_a = int((summary or {}).get("today_acertos") or 0)
                     cloud_streak = int((summary or {}).get("streak_dias") or 0)
+                    cloud_last_activity = str((summary or {}).get("last_activity_day") or "").strip() or None
                     await asyncio.to_thread(
                         self.db.sync_cloud_quiz_totals,
                         local_uid,
@@ -512,11 +513,16 @@ class LoginView(ft.View):
                         cloud_today_q,
                         cloud_today_a,
                         cloud_streak,
+                        cloud_last_activity,
                     )
-                    usuario["total_questoes"] = max(int(usuario.get("total_questoes") or 0), cloud_total)
-                    usuario["acertos"] = max(int(usuario.get("acertos") or 0), cloud_acertos)
-                    usuario["xp"] = max(int(usuario.get("xp") or 0), cloud_xp)
-                    usuario["streak_dias"] = max(int(usuario.get("streak_dias") or 0), cloud_streak)
+                    resumo_local = await asyncio.to_thread(self.db.obter_resumo_estatisticas, local_uid)
+                    usuario["total_questoes"] = int((resumo_local or {}).get("total_questoes") or cloud_total)
+                    usuario["acertos"] = int((resumo_local or {}).get("acertos_total") or cloud_acertos)
+                    usuario["xp"] = int((resumo_local or {}).get("xp") or cloud_xp)
+                    usuario["streak_dias"] = int((resumo_local or {}).get("streak_dias") or 0)
+                    ultima_local = str((resumo_local or {}).get("ultima_atividade") or cloud_last_activity or "").strip()
+                    if ultima_local:
+                        usuario["ultima_atividade"] = ultima_local
             except Exception as ex_stats:
                 log_exception(ex_stats, "login_view._acao_login_async.sync_remote_quiz_stats")
             if migrated_from_local:

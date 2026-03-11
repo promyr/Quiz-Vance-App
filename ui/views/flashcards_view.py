@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """View de Flashcards â€” extraÃ­da do main_v2.py."""
 
 from __future__ import annotations
@@ -21,7 +21,9 @@ from core.ui_text_sanitizer import (
 
 from core.helpers.ai_helpers import (
     create_user_ai_service,
-    extract_user_api_keys,
+    resolve_available_provider_keys,
+    resolve_provider_switch_options,
+    provider_api_field,
     generation_profile,
     is_ai_quota_exceeded,
     ai_issue_kind,
@@ -384,6 +386,8 @@ def build_flashcards_body(state: dict, navigate, dark: bool) -> ft.Control:
         config_section.visible = False
         study_section.visible = True
 
+    _fc_actions = [None, None]  # [row_mostrar, row_avaliar] -- preenchido depois
+
     def _render_flashcards():
         cards_column.controls.clear()
         screen = (screen_width(page) if page else 1280)
@@ -486,6 +490,9 @@ def build_flashcards_body(state: dict, navigate, dark: bool) -> ft.Control:
         else:
             contador_flashcards.value = f"Prontos: {len(flashcards)}"
         desempenho_text.value = f"Lembrei {estado['lembrei']} | Rever {estado['rever']}"
+        if _fc_actions[0] is not None:
+            _fc_actions[0].visible = not revelou
+            _fc_actions[1].visible = revelou
         _sanitize_control_texts(cards_column)
 
     async def _animate_card_transition(mutator):
@@ -663,17 +670,8 @@ def build_flashcards_body(state: dict, navigate, dark: bool) -> ft.Control:
             _mostrar_resposta()
 
     def _provider_switch_options() -> list[tuple[str, str]]:
-        keys = extract_user_api_keys(user)
-        current_provider = str(user.get("provider") or "gemini").strip().lower()
-        options: list[tuple[str, str]] = []
-        for p in ("gemini", "openai", "groq"):
-            if p == current_provider:
-                continue
-            if not str(keys.get(p) or "").strip():
-                continue
-            provider_name = str(AI_PROVIDERS.get(p, {}).get("name") or p.capitalize())
-            options.append((p, provider_name))
-        return options
+        current_user = state.get("usuario") if isinstance(state.get("usuario"), dict) else user
+        return resolve_provider_switch_options(current_user, db=db)
 
     def _switch_provider_and_retry(provider_key: str):
         try:
@@ -685,13 +683,24 @@ def build_flashcards_body(state: dict, navigate, dark: bool) -> ft.Control:
             current_model = str(user.get("model") or "").strip()
             fallback_model = str(cfg.get("default_model") or (model_candidates[0] if model_candidates else current_model)).strip()
             next_model = current_model if current_model in model_candidates else fallback_model
+            current_user = state.get("usuario") if isinstance(state.get("usuario"), dict) else user
+            keys = resolve_available_provider_keys(current_user, db=db)
+            active_key = str(keys.get(selected) or "").strip() or None
             user["provider"] = selected
             if next_model:
                 user["model"] = next_model
+            user["api_key"] = active_key
+            for provider_name in ("gemini", "openai", "groq"):
+                provider_value = str(keys.get(provider_name) or "").strip() or None
+                user[provider_api_field(provider_name)] = provider_value
             if isinstance(state.get("usuario"), dict):
                 state["usuario"]["provider"] = selected
                 if next_model:
                     state["usuario"]["model"] = next_model
+                state["usuario"]["api_key"] = active_key
+                for provider_name in ("gemini", "openai", "groq"):
+                    provider_value = str(keys.get(provider_name) or "").strip() or None
+                    state["usuario"][provider_api_field(provider_name)] = provider_value
             if db and user.get("id") and hasattr(db, "atualizar_provider_ia"):
                 db.atualizar_provider_ia(int(user["id"]), selected, next_model or fallback_model)
             provider_name = str(cfg.get("name") or selected)
@@ -717,7 +726,7 @@ def build_flashcards_body(state: dict, navigate, dark: bool) -> ft.Control:
 
         try:
             modo_continuo = (quantidade_dropdown.value == "cont")
-            quantidade = 20 if modo_continuo else max(1, min(10, int(quantidade_dropdown.value or "5")))
+            quantidade = 5 if modo_continuo else max(1, min(10, int(quantidade_dropdown.value or "5")))
         except ValueError:
             quantidade = 5
             modo_continuo = False
@@ -916,21 +925,25 @@ def build_flashcards_body(state: dict, navigate, dark: bool) -> ft.Control:
         spacing=10, visible=True,
     )
 
+    btn_mostrar_resp = ft.Container(content=ds_btn_primary("Mostrar resposta", icon=ft.Icons.VISIBILITY, on_click=_mostrar_resposta_click, dark=dark), expand=True)
+    btn_lembrei_resp = ft.Container(content=ds_btn_primary("Lembrei", icon=ft.Icons.CHECK_CIRCLE, on_click=_mark_lembrei, dark=dark), expand=True)
+    btn_rever_resp = ft.Container(content=ft.ElevatedButton("Rever", icon=ft.Icons.REFRESH, on_click=_mark_rever, color="#FFFFFF", bgcolor=CORES["warning"], height=48, style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8))), expand=True)
+    actions_row_mostrar = ft.Row([btn_mostrar_resp], visible=True)
+    actions_row_avaliar = ft.Row([btn_rever_resp, btn_lembrei_resp], visible=False, spacing=10)
+    _fc_actions[0] = actions_row_mostrar
+    _fc_actions[1] = actions_row_avaliar
+    flashcard_actions = ft.Column([actions_row_mostrar, actions_row_avaliar], spacing=0)
+
+    btn_nav_prev = ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, on_click=_prev_card_click, icon_color=_color("texto", dark), tooltip="Anterior")
+    btn_nav_next = ft.IconButton(icon=ft.Icons.CHEVRON_RIGHT, on_click=_next_card_click, icon_color=_color("texto", dark), tooltip="Proximo")
+
     study_section = ft.Column(
         [
             ft.Row([ft.Text("Revisao de flashcards", size=17, weight=ft.FontWeight.W_600, color=_color("texto", dark)), ft.Row([contador_flashcards, desempenho_text], spacing=10, wrap=True)], wrap=True, alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             status_banner(status_estudo, dark),
             ft.Container(alignment=ft.Alignment(0, 0), content=cards_host),
-            ds_action_bar(
-                [
-                    {"label": "Mostrar resposta", "icon": ft.Icons.VISIBILITY, "on_click": _mostrar_resposta_click, "kind": "primary"},
-                    {"label": "Lembrei", "icon": ft.Icons.CHECK_CIRCLE, "on_click": _mark_lembrei, "kind": "primary"},
-                    {"label": "Rever", "icon": ft.Icons.REFRESH, "on_click": _mark_rever, "kind": "warning"},
-                ],
-                dark=dark,
-            ),
-            ft.ResponsiveRow([ft.Container(col={"xs": 12, "md": 6}, content=ds_btn_secondary("Anterior", icon=ft.Icons.CHEVRON_LEFT, on_click=_prev_card_click, dark=dark, expand=True)), ft.Container(col={"xs": 12, "md": 6}, content=ds_btn_secondary("Proximo", icon=ft.Icons.CHEVRON_RIGHT, on_click=_next_card_click, dark=dark, expand=True))], run_spacing=6, spacing=10),
-            ft.ResponsiveRow([ft.Container(col={"xs": 12, "md": 6}, content=ds_btn_ghost("Voltar para configuracao", icon=ft.Icons.ARROW_BACK, on_click=_voltar_config, dark=dark)), ft.Container(col={"xs": 12, "md": 6}, content=ds_btn_ghost("Voltar ao Inicio", icon=ft.Icons.HOME_OUTLINED, on_click=lambda _: navigate("/home"), dark=dark))], run_spacing=6, spacing=10),
+            ft.Row([btn_nav_prev, ft.Container(content=flashcard_actions, expand=True), btn_nav_next], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+            ft.Row([ft.TextButton("Voltar", icon=ft.Icons.ARROW_BACK, on_click=_voltar_config), ft.TextButton("Inicio", icon=ft.Icons.HOME_OUTLINED, on_click=lambda _: navigate("/home"))], alignment=ft.MainAxisAlignment.CENTER, spacing=20),
         ],
         spacing=10, expand=True, scroll=ft.ScrollMode.AUTO, visible=False,
     )

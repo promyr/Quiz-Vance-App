@@ -4,6 +4,7 @@ Testes automatizados do Quiz Vance
 """
 
 from config import CORES, AI_PROVIDERS, DIFICULDADES, NIVEIS, get_level_info
+from quiz_prompt_v2 import sanitize_question
 
 
 # ---------------------------------------------------------------------------
@@ -145,3 +146,26 @@ def test_nivel_maximo_infinito():
     import math
     maximos = [data for data in NIVEIS.values() if math.isinf(data["xp_max"])]
     assert len(maximos) == 1, "Deve haver exatamente um nivel com xp_max infinito"
+
+
+def test_sanitize_question_nao_corta_opcao_longa():
+    """Alternativas longas devem ser preservadas integralmente."""
+    opcao_longa = (
+        "Alternativa extensa com descricao detalhada, incluindo excecoes, condicionantes, "
+        "contexto normativo e consequencias praticas para validar que nao existe corte artificial."
+    )
+    sanitized = sanitize_question(
+        {
+            "pergunta": "Qual alternativa descreve corretamente o caso?",
+            "subtema": "Teste",
+            "opcoes": [
+                opcao_longa,
+                "Opcao 2",
+                "Opcao 3",
+                "Opcao 4",
+            ],
+            "correta_index": 0,
+            "explicacao": "Explicacao curta.",
+        }
+    )
+    assert sanitized["opcoes"][0] == opcao_longa

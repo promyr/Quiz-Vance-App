@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from starlette.concurrency import run_in_threadpool
 from .database import engine, get_db
-from . import models, schemas, services, mercadopago
+from . import models, schemas, services, mercadopago, telegram_bot
 
 
 app = FastAPI(title="Quiz Vance Billing API", version="1.0.0")
@@ -73,6 +73,26 @@ def _ensure_payments_unique_index() -> None:
 
 
 _ensure_payments_unique_index()
+
+
+def _ensure_users_activity_columns() -> None:
+    try:
+        dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "").lower()
+        with engine.begin() as conn:
+            if "sqlite" in dialect:
+                rows = conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()
+                cols = {str(row[1] or "").strip().lower() for row in rows}
+                if "last_activity_day" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE users ADD COLUMN last_activity_day DATE")
+            else:
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_activity_day DATE"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_last_activity_day ON users(last_activity_day)"))
+    except Exception:
+        # Nao bloqueia boot em base legada; corrigir manualmente apenas se necessario.
+        pass
+
+
+_ensure_users_activity_columns()
 
 
 def _backend_public_url(request: Request) -> str:
@@ -184,6 +204,43 @@ def _mp_webhook_token_ok(request: Request) -> bool:
     return (q_token == MP_WEBHOOK_TOKEN) or (h_token == MP_WEBHOOK_TOKEN)
 
 
+def _telegram_webhook_secret_ok(request: Request) -> bool:
+    secret = str(telegram_bot.webhook_secret() or "").strip()
+    if not secret:
+        return True
+    header_token = str(request.headers.get("X-Telegram-Bot-Api-Secret-Token") or "").strip()
+    return header_token == secret
+
+
+def _notify_telegram_checkout_event(
+    title: str,
+    *,
+    user: models.User | None = None,
+    checkout_id: str = "",
+    plan_code: str = "",
+    amount_cents: int = 0,
+    provider: str = "",
+    detail: str = "",
+) -> None:
+    if not telegram_bot.telegram_enabled():
+        return
+    try:
+        telegram_bot.notify_admin_event(
+            title,
+            user_id=int(getattr(user, "id", 0) or 0),
+            name=str(getattr(user, "name", "") or ""),
+            email_id=str(getattr(user, "email_id", "") or ""),
+            plan_code=str(plan_code or ""),
+            amount_cents=int(amount_cents or 0),
+            provider=str(provider or ""),
+            checkout_id=str(checkout_id or ""),
+            detail=str(detail or ""),
+        )
+    except Exception:
+        # Alertas de Telegram nao podem derrubar fluxo de billing.
+        pass
+
+
 def _ensure_user_settings_row(db: Session, user_id: int) -> models.UserSettings:
     row = db.query(models.UserSettings).filter(models.UserSettings.user_id == int(user_id)).first()
     if row:
@@ -213,6 +270,70 @@ def health_ready(db: Session = Depends(get_db)):
         return {"ok": True, "db": "up", "ts": datetime.now(timezone.utc).isoformat()}
     except Exception as ex:
         raise HTTPException(status_code=503, detail=f"db_down: {ex}") from ex
+
+
+@app.get("/telegram/health")
+def telegram_health():
+    return {
+        "ok": True,
+        "telegram_enabled": telegram_bot.telegram_enabled(),
+        "webhook_secret_configured": bool(str(telegram_bot.webhook_secret() or "").strip()),
+        "community_invite_configured": bool(telegram_bot.community_invite_url()),
+        "download_url_configured": bool(telegram_bot.download_url()),
+        "alert_chat_configured": bool(telegram_bot.alert_chat_id() is not None),
+    }
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    if not _telegram_webhook_secret_ok(request):
+        raise HTTPException(status_code=403, detail="invalid_telegram_secret")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    result = await run_in_threadpool(telegram_bot.handle_update, payload)
+    return {"ok": True, "result": result}
+
+
+@app.post("/telegram/group/provision")
+def telegram_group_provision(
+    payload: schemas.TelegramProvisionIn,
+    app_secret: str | None = Header(default=None, alias="X-App-Secret"),
+):
+    _require_app_secret(app_secret)
+    client = telegram_bot.TelegramBotClient()
+    try:
+        return telegram_bot.provision_community_group(
+            client,
+            payload.chat_id,
+            set_commands=bool(payload.set_commands),
+            pin_messages=bool(payload.pin_messages),
+            chat_title_override=str(payload.chat_title or ""),
+            chat_description_override=str(payload.chat_description or ""),
+            dry_run=bool(payload.dry_run),
+        )
+    except Exception as ex:
+        raise HTTPException(status_code=400, detail=f"telegram_provision_failed: {ex}") from ex
+
+
+@app.post("/telegram/webhook/configure")
+def telegram_webhook_configure(
+    payload: schemas.TelegramWebhookConfigIn,
+    app_secret: str | None = Header(default=None, alias="X-App-Secret"),
+):
+    _require_app_secret(app_secret)
+    client = telegram_bot.TelegramBotClient()
+    try:
+        return telegram_bot.configure_webhook(
+            client,
+            payload.public_base_url,
+            drop_pending_updates=bool(payload.drop_pending_updates),
+        )
+    except Exception as ex:
+        raise HTTPException(status_code=400, detail=f"telegram_webhook_config_failed: {ex}") from ex
 
 
 @app.post("/auth/register", response_model=schemas.AuthOut)
@@ -377,6 +498,15 @@ def start_checkout(
             db.commit()
             db.refresh(checkout)
 
+    _notify_telegram_checkout_event(
+        "Novo checkout iniciado",
+        user=user,
+        checkout_id=str(checkout.checkout_id or ""),
+        plan_code=str(checkout.plan_code or ""),
+        amount_cents=int(checkout.amount_cents or 0),
+        provider=provider,
+    )
+
     return {
         "ok": True,
         "message": msg,
@@ -414,6 +544,14 @@ def confirm_checkout(
     )
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
+    _notify_telegram_checkout_event(
+        "Pagamento confirmado manualmente",
+        user=user,
+        checkout_id=str(payload.checkout_id or ""),
+        plan_code=str(getattr(_row, "plan_code", "") or ""),
+        amount_cents=int(getattr(_row, "amount_cents", 0) or 0),
+        provider=str(payload.provider or "manual"),
+    )
     return {"ok": True, "message": msg, "plan": _auth_out(db, user)}
 
 
@@ -469,6 +607,14 @@ def reconcile_checkout(
     )
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
+    _notify_telegram_checkout_event(
+        "Pagamento reconciliado",
+        user=user,
+        checkout_id=str(checkout.checkout_id or ""),
+        plan_code=str(checkout.plan_code or ""),
+        amount_cents=int(amount_cents or 0),
+        provider="mercadopago",
+    )
     return {"ok": True, "message": msg, "plan": _auth_out(db, user)}
 
 
@@ -614,6 +760,16 @@ async def billing_webhook_mercadopago(request: Request, db: Session = Depends(ge
     )
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
+    user = db.query(models.User).filter(models.User.id == int(checkout.user_id)).first()
+    _notify_telegram_checkout_event(
+        "Pagamento aprovado no Mercado Pago",
+        user=user,
+        checkout_id=str(checkout.checkout_id or ""),
+        plan_code=str(checkout.plan_code or ""),
+        amount_cents=int(amount_cents or 0),
+        provider="mercadopago",
+        detail=f"payment_id={tx_id}",
+    )
     return {"ok": True, "message": msg}
 
 
@@ -664,6 +820,7 @@ def sync_quiz_stats_batch(
     duplicated = 0
     total_xp = 0
     consumed_event_ids: list[str] = []
+    activity_days: set[date] = set()
     now = datetime.now(timezone.utc)
     events = list(payload.events or [])[:1000]
 
@@ -717,6 +874,7 @@ def sync_quiz_stats_batch(
         daily.acertos = int(daily.acertos or 0) + acertos_delta
         daily.xp_ganho = int(daily.xp_ganho or 0) + xp_delta
         daily.updated_at = now
+        activity_days.add(day_key)
 
         db.add(
             models.QuizStatsEvent(
@@ -735,6 +893,8 @@ def sync_quiz_stats_batch(
 
     if processed > 0:
         user.xp = int(user.xp or 0) + int(total_xp)
+        for day_key in sorted(activity_days):
+            services.apply_user_daily_activity(user, day_key)
     db.commit()
 
     return {
@@ -743,6 +903,40 @@ def sync_quiz_stats_batch(
         "duplicated": int(duplicated),
         "received": int(len(events)),
         "consumed_event_ids": consumed_event_ids,
+    }
+
+
+@app.post("/internal/stats/activity/ping")
+def ping_daily_activity(
+    payload: schemas.QuizActivityPingIn,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    app_secret: str | None = Header(default=None, alias="X-App-Secret"),
+    db: Session = Depends(get_db),
+):
+    uid, _internal = _resolve_authenticated_user_id(int(payload.user_id), authorization, app_secret)
+    user = db.query(models.User).filter(models.User.id == int(uid)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario nao encontrado")
+    if isinstance(payload.activity_day, date):
+        activity_day = payload.activity_day
+    else:
+        try:
+            tz_offset = max(-14.0, min(14.0, float(payload.tz_offset_hours or 0.0)))
+            client_tz = timezone(timedelta(hours=tz_offset))
+            activity_day = datetime.now(client_tz).date()
+        except Exception:
+            activity_day = date.today()
+    streak_dias, last_activity_day = services.merge_user_daily_activity(
+        db,
+        int(uid),
+        activity_day,
+        int(payload.streak_dias or 0) if payload.streak_dias is not None else None,
+    )
+    return {
+        "ok": True,
+        "user_id": int(uid),
+        "streak_dias": int(streak_dias or 0),
+        "last_activity_day": last_activity_day.isoformat() if isinstance(last_activity_day, date) else None,
     }
 
 
@@ -802,6 +996,17 @@ def get_quiz_stats_summary(
             break
         streak_dias += 1
         day_cursor = day_cursor - timedelta(days=1)
+    last_activity_day = user.last_activity_day if isinstance(user.last_activity_day, date) else None
+    try:
+        daily_activity_days = [k for k, v in daily_map.items() if isinstance(k, date) and int((v or (0, 0))[0] or 0) > 0]
+        derived_last_activity_day = max(daily_activity_days) if daily_activity_days else None
+    except Exception:
+        daily_activity_days = []
+        derived_last_activity_day = None
+    if derived_last_activity_day and (last_activity_day is None or derived_last_activity_day > last_activity_day):
+        last_activity_day = derived_last_activity_day
+    if not daily_activity_days:
+        streak_dias = max(0, int(user.streak_days or 0))
     return schemas.QuizStatsSummaryOut(
         user_id=int(uid),
         total_questoes=max(0, int(total_questoes)),
@@ -811,6 +1016,7 @@ def get_quiz_stats_summary(
         today_acertos=max(0, today_acertos),
         today_xp=max(0, today_xp),
         streak_dias=max(0, int(streak_dias)),
+        last_activity_day=last_activity_day,
     )
 
 

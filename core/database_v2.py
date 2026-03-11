@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Database V2.0 - Quiz Vance
 
@@ -103,6 +103,7 @@ class Database:
                     pass
                 self._local.conn = None
         real = sqlite3.connect(self.db_path, check_same_thread=False)
+        real.execute("PRAGMA journal_mode=WAL")
         pooled = _PooledConnection(real)
         self._local.conn = pooled
         return pooled  # type: ignore[return-value]
@@ -568,7 +569,62 @@ class Database:
                 FOREIGN KEY (user_id) REFERENCES usuarios (id)
             )
         """)
-        
+
+        # ---- Indices para acelerar queries frequentes ----
+        _indices = [
+            # questoes_usuario: consultada em quase toda tela
+            "CREATE INDEX IF NOT EXISTS idx_questoes_usuario_uid ON questoes_usuario(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_questoes_usuario_uid_qhash ON questoes_usuario(user_id, qhash)",
+            "CREATE INDEX IF NOT EXISTS idx_questoes_usuario_uid_revisao ON questoes_usuario(user_id, proxima_revisao)",
+            "CREATE INDEX IF NOT EXISTS idx_questoes_usuario_uid_erro ON questoes_usuario(user_id, marcado_erro)",
+            "CREATE INDEX IF NOT EXISTS idx_questoes_usuario_uid_fav ON questoes_usuario(user_id, favorita)",
+            # flashcards: consultas por user_id + proxima_revisao
+            "CREATE INDEX IF NOT EXISTS idx_flashcards_uid ON flashcards(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_flashcards_uid_revisao ON flashcards(user_id, proxima_revisao)",
+            "CREATE INDEX IF NOT EXISTS idx_flashcards_uid_tema ON flashcards(user_id, tema)",
+            # historico_xp
+            "CREATE INDEX IF NOT EXISTS idx_historico_xp_uid ON historico_xp(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_historico_xp_uid_data ON historico_xp(user_id, data_hora)",
+            # questoes_erros
+            "CREATE INDEX IF NOT EXISTS idx_questoes_erros_uid ON questoes_erros(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_questoes_erros_uid_corrigido ON questoes_erros(user_id, corrigido)",
+            # estudo_tempo_diario
+            "CREATE INDEX IF NOT EXISTS idx_estudo_tempo_uid ON estudo_tempo_diario(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_estudo_tempo_uid_dia ON estudo_tempo_diario(user_id, dia)",
+            # biblioteca_pdfs
+            "CREATE INDEX IF NOT EXISTS idx_biblioteca_pdfs_uid ON biblioteca_pdfs(user_id)",
+            # review_sessions
+            "CREATE INDEX IF NOT EXISTS idx_review_sessions_uid ON review_sessions(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_review_session_items_sid ON review_session_items(session_id)",
+            # mock_exam
+            "CREATE INDEX IF NOT EXISTS idx_mock_exam_sessions_uid ON mock_exam_sessions(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_mock_exam_items_sid ON mock_exam_items(session_id)",
+            # study_plan
+            "CREATE INDEX IF NOT EXISTS idx_study_plan_runs_uid ON study_plan_runs(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_study_plan_items_pid ON study_plan_items(plan_id)",
+            # study_packages
+            "CREATE INDEX IF NOT EXISTS idx_study_packages_uid ON study_packages(user_id)",
+            # estudo_progresso_diario
+            "CREATE INDEX IF NOT EXISTS idx_estudo_progresso_uid ON estudo_progresso_diario(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_estudo_progresso_uid_dia ON estudo_progresso_diario(user_id, dia)",
+            # usage_daily
+            "CREATE INDEX IF NOT EXISTS idx_usage_daily_uid ON usage_daily(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_usage_daily_uid_feat_day ON usage_daily(user_id, feature_key, day_key)",
+            # conquistas
+            "CREATE INDEX IF NOT EXISTS idx_usuario_conquistas_uid ON usuario_conquistas(user_id)",
+            # questoes_notas
+            "CREATE INDEX IF NOT EXISTS idx_questoes_notas_uid ON questoes_notas(user_id)",
+            # stats_sync_queue
+            "CREATE INDEX IF NOT EXISTS idx_stats_sync_uid ON stats_sync_queue(user_id)",
+            # banco_questoes
+            "CREATE INDEX IF NOT EXISTS idx_banco_questoes_tema ON banco_questoes(tema)",
+        ]
+        for idx_sql in _indices:
+            try:
+                cursor.execute(idx_sql)
+            except Exception:
+                pass
+
         conn.commit()
         conn.close()
         
@@ -924,8 +980,7 @@ class Database:
                     UPDATE usuarios
                     SET backend_user_id = ?,
                         nome = ?,
-                        email = ?,
-                        ultima_atividade = DATE('now','localtime')
+                        email = ?
                     WHERE id = ?
                     """,
                     (int(backend_user_id or 0), nome_clean, email_clean, user_id),
@@ -936,7 +991,7 @@ class Database:
                 cursor.execute(
                     """
                     INSERT INTO usuarios (backend_user_id, nome, email, senha, idade, avatar, ultima_atividade, onboarding_seen)
-                    VALUES (?, ?, ?, ?, ?, ?, DATE('now','localtime'), 0)
+                    VALUES (?, ?, ?, ?, ?, ?, NULL, 0)
                     """,
                     (int(backend_user_id or 0), nome_clean, email_clean, senha_random, 18, "user"),
                 )
@@ -1268,6 +1323,32 @@ class Database:
         )
         conn.commit()
         conn.close()
+
+    def obter_api_keys_ia(self, user_id: int) -> Dict[str, Optional[str]]:
+        """Retorna as chaves descriptografadas por provider do usuario."""
+        conn = self.conectar()
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT api_key_gemini, api_key_openai, api_key_groq
+                FROM user_ai_config
+                WHERE user_id = ?
+                LIMIT 1
+                """,
+                (int(user_id),),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return {"gemini": None, "openai": None, "groq": None}
+            return {
+                "gemini": self._decrypt_api_key(row["api_key_gemini"]),
+                "openai": self._decrypt_api_key(row["api_key_openai"]),
+                "groq": self._decrypt_api_key(row["api_key_groq"]),
+            }
+        finally:
+            conn.close()
     
     def atualizar_provider_ia(self, user_id: int, provider: str, model: str):
         """Atualiza configuraÃ§Ã£o de IA do usuÃ¡rio"""
@@ -1411,11 +1492,15 @@ class Database:
         today_questoes: Optional[int] = None,
         today_acertos: Optional[int] = None,
         streak_dias: Optional[int] = None,
+        last_activity_day: Optional[str] = None,
     ) -> None:
         conn = self.conectar()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT xp, acertos, total_questoes, streak_dias FROM usuarios WHERE id = ?", (int(user_id),))
+            cursor.execute(
+                "SELECT xp, acertos, total_questoes, streak_dias, ultima_atividade FROM usuarios WHERE id = ?",
+                (int(user_id),),
+            )
             row = cursor.fetchone()
             if not row:
                 return
@@ -1423,24 +1508,46 @@ class Database:
             acertos_local = int(row[1] or 0)
             total_local = int(row[2] or 0)
             streak_local = int(row[3] or 0)
+            ultima_local = str(row[4] or "").strip()[:10]
             xp_cloud = int(total_xp or 0) if total_xp is not None else xp_local
             acertos_cloud = int(total_acertos or 0)
             total_cloud = int(total_questoes or 0)
             streak_cloud = max(0, int(streak_dias or 0)) if streak_dias is not None else streak_local
+
+            def _norm_day(value: Optional[str]) -> Optional[str]:
+                txt = str(value or "").strip()[:10]
+                if len(txt) != 10:
+                    return None
+                try:
+                    datetime.datetime.strptime(txt, "%Y-%m-%d")
+                except Exception:
+                    return None
+                return txt
+
+            merged_last_activity = _norm_day(ultima_local)
+            cloud_last_activity = _norm_day(last_activity_day)
+            if cloud_last_activity and ((not merged_last_activity) or (cloud_last_activity > merged_last_activity)):
+                merged_last_activity = cloud_last_activity
+            if cloud_last_activity and merged_last_activity == cloud_last_activity:
+                merged_streak = streak_cloud
+            else:
+                merged_streak = streak_local
             cursor.execute(
                 """
                 UPDATE usuarios
                 SET xp = ?,
                     acertos = ?,
                     total_questoes = ?,
-                    streak_dias = ?
+                    streak_dias = ?,
+                    ultima_atividade = ?
                 WHERE id = ?
                 """,
                 (
                     max(0, max(xp_local, xp_cloud)),
                     max(0, max(acertos_local, acertos_cloud)),
                     max(0, max(total_local, total_cloud)),
-                    max(0, max(streak_local, streak_cloud)),
+                    max(0, int(merged_streak)),
+                    merged_last_activity,
                     int(user_id),
                 ),
             )
@@ -1613,7 +1720,8 @@ class Database:
         if not ultima:
             return max(1, streak_atual)
         try:
-            ultima_data = datetime.datetime.strptime(str(ultima), "%Y-%m-%d").date()
+            ultima_str = str(ultima)[:10]
+            ultima_data = datetime.datetime.strptime(ultima_str, "%Y-%m-%d").date()
         except ValueError:
             return max(1, streak_atual)
         if ultima_data == hoje:
@@ -1624,23 +1732,17 @@ class Database:
 
     def registrar_login_diario(self, user_id: int) -> int:
         """
-        Marca atividade no login e atualiza streak sem depender de resposta.
+        Mantido por compatibilidade: login sozinho nao deve aumentar streak.
         """
         conn = self.conectar()
         cursor = conn.cursor()
         try:
-            novo_streak = self._calcular_streak(cursor, int(user_id))
             cursor.execute(
-                """
-                UPDATE usuarios
-                SET streak_dias = ?,
-                    ultima_atividade = DATE('now','localtime')
-                WHERE id = ?
-                """,
-                (int(max(1, novo_streak)), int(user_id)),
+                "SELECT streak_dias FROM usuarios WHERE id = ?",
+                (int(user_id),),
             )
-            conn.commit()
-            return int(max(1, novo_streak))
+            row = cursor.fetchone()
+            return int((row[0] if row else 0) or 0)
         finally:
             conn.close()
 

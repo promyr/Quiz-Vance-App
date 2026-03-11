@@ -78,7 +78,7 @@ def build_profile_body(state: dict, navigate, dark: bool) -> ft.Control:
             ft.Container(
                 col={"sm": 6, "md": 3},
                 content=ft.Card(elevation=1, content=ft.Container(padding=12, content=ft.Column([
-                    ft.Text("Streak", size=12, color=_color("texto_sec", dark)),
+                    ft.Text("Sequência", size=12, color=_color("texto_sec", dark)),
                     ft.Text(f"{streak} dia(s)", size=18, weight=ft.FontWeight.BOLD, color=_color("texto", dark)),
                 ], spacing=4))),
             ),

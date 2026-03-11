@@ -156,10 +156,10 @@ def _read_env_float(name: str, default: float) -> float:
 
 
 _QUIZ_STATS_SYNC_INTERVAL_S = max(
-    8.0,
+    6.0,
     _read_env_float(
         "QUIZVANCE_STATS_SYNC_INTERVAL_S",
-        _read_env_float("QUIZVANCE_CLOUD_SYNC_INTERVAL_S", 8.0 if is_android() else 20.0),
+        _read_env_float("QUIZVANCE_CLOUD_SYNC_INTERVAL_S", 6.0),
     ),
 )
 _SETTINGS_SYNC_INTERVAL_S = max(8.0, _read_env_float("QUIZVANCE_SETTINGS_SYNC_INTERVAL_S", 20.0))
@@ -5239,6 +5239,75 @@ def _build_settings_body(state, navigate, dark: bool):
             except Exception:
                 pass
 
+    def _persist_provider_key_change(target_provider: str) -> bool:
+        provider_saved = _normalize_provider((state.get("usuario") or {}).get("provider") or provider_dropdown.value or "gemini")
+        model_saved = str((state.get("usuario") or {}).get("model") or "").strip()
+        modelos_validos = AI_PROVIDERS.get(provider_saved, AI_PROVIDERS["gemini"]).get("models") or []
+        if model_saved not in modelos_validos:
+            model_saved = str(
+                AI_PROVIDERS.get(provider_saved, AI_PROVIDERS["gemini"]).get("default_model")
+                or (modelos_validos[0] if modelos_validos else "gemini-2.5-flash")
+            ).strip()
+        economia_saved = bool((state.get("usuario") or {}).get("economia_mode", economia_mode_switch.value))
+        telemetry_saved = bool((state.get("usuario") or {}).get("telemetry_opt_in", telemetry_opt_in_switch.value))
+        normalized_keys = {
+            p: (str(api_keys.get(p) or "").strip() or None)
+            for p in _AI_KEY_PROVIDERS
+        }
+        active_api_value = normalized_keys.get(provider_saved)
+
+        if hasattr(db, "atualizar_api_keys"):
+            db.atualizar_api_keys(user_id, api_keys, provider_saved)
+        else:
+            db.atualizar_api_key(user_id, str(active_api_value or ""))
+
+        state["usuario"]["api_key"] = active_api_value
+        for p in _AI_KEY_PROVIDERS:
+            state["usuario"][_provider_api_field(p)] = normalized_keys.get(p)
+
+        state["settings_sync_signature"] = _settings_signature(
+            provider_saved,
+            model_saved,
+            bool(economia_saved),
+            bool(telemetry_saved),
+            normalized_keys,
+        )
+        now_mono = time.monotonic()
+        state["last_settings_sync_ts"] = now_mono
+        state["settings_local_dirty_until_ts"] = now_mono + max(10.0, _SETTINGS_SYNC_INTERVAL_S)
+
+        backend_ref = state.get("backend")
+        backend_uid = _backend_user_id(state.get("usuario") or {})
+        target_clean = _normalize_provider(target_provider)
+        target_value = str(api_keys.get(target_clean) or "").strip()
+
+        async def _push_provider_key_remote_async():
+            if not (backend_ref and backend_ref.enabled()):
+                return
+            if int(backend_uid or 0) <= 0:
+                return
+            try:
+                await asyncio.to_thread(
+                    backend_ref.upsert_user_provider_key,
+                    int(backend_uid),
+                    provider_saved,
+                    model_saved,
+                    bool(economia_saved),
+                    bool(telemetry_saved),
+                    target_clean,
+                    target_value,
+                    str(active_api_value or ""),
+                )
+            except Exception as ex_sync:
+                log_exception(ex_sync, "settings_key_dialog.sync_remote")
+
+        if page and backend_ref and backend_ref.enabled():
+            try:
+                page.run_task(_push_provider_key_remote_async)
+            except Exception as ex_task:
+                log_exception(ex_task, "settings_key_dialog.schedule_remote_sync")
+        return True
+
     def _open_key_dialog(initial_provider: Optional[str] = None):
         if not page:
             return
@@ -5285,11 +5354,12 @@ def _build_settings_body(state, navigate, dark: bool):
         def _save_key(_):
             provider_sel = _normalize_provider(selected_provider_ref["value"])
             api_keys[provider_sel] = str(key_field.value or "").strip()
+            _persist_provider_key_change(provider_sel)
             _close_dialog_compat(page, dialog_ref.get("dlg"))
             _update_key_status()
             if page:
                 page.snack_bar = ft.SnackBar(
-                    content=ft.Text(f"Chave salva para {AI_PROVIDERS.get(provider_sel, {}).get('name', provider_sel)}"),
+                    content=ft.Text(f"Chave salva na conta para {AI_PROVIDERS.get(provider_sel, {}).get('name', provider_sel)}"),
                     bgcolor=CORES["sucesso"],
                     show_close_icon=True,
                 )
@@ -5300,11 +5370,12 @@ def _build_settings_body(state, navigate, dark: bool):
             provider_sel = _normalize_provider(selected_provider_ref["value"])
             api_keys[provider_sel] = ""
             key_field.value = ""
+            _persist_provider_key_change(provider_sel)
             _close_dialog_compat(page, dialog_ref.get("dlg"))
             _update_key_status()
             if page:
                 page.snack_bar = ft.SnackBar(
-                    content=ft.Text(f"Chave removida de {AI_PROVIDERS.get(provider_sel, {}).get('name', provider_sel)}"),
+                    content=ft.Text(f"Chave removida da conta para {AI_PROVIDERS.get(provider_sel, {}).get('name', provider_sel)}"),
                     bgcolor=CORES["warning"],
                     show_close_icon=True,
                 )
@@ -5663,6 +5734,12 @@ def _open_menu_dialog(page: ft.Page, state: dict, current_route: str, dark: bool
 def _build_shell_view(page: ft.Page, state: dict, route: str, body: ft.Control, on_logout, dark: bool, toggle_dark):
     def navigate(target: str):
         target_route = _normalize_route_path(target)
+        # Invalidar cache de rotas de dados para garantir conteudo fresco
+        if target_route in {"/home", "/stats", "/profile", "/mais"}:
+            _vc = state.get("view_cache")
+            if _vc:
+                for _r in ("/home", "/stats", "/profile", "/mais"):
+                    _vc.pop(_r, None)
         current_route = _normalize_route_path(page.route or route or "/home")
         if current_route not in {"/", "/login"} and current_route != target_route:
             history = state.setdefault("route_history", [])
@@ -6370,8 +6447,19 @@ def main(page: ft.Page):
         page.bgcolor = _color("fundo", dark)
         page.update()
 
+    _DATA_VIEW_ROUTES = frozenset({"/home", "/stats", "/profile", "/mais"})
+
+    def _invalidate_data_views():
+        cache = state.get("view_cache")
+        if cache:
+            for r in _DATA_VIEW_ROUTES:
+                cache.pop(r, None)
+
     def navigate(route: str):
         target_route = _normalize_route_path(route)
+        # Invalida cache de rotas de dados para garantir conteudo fresco
+        if target_route in _DATA_VIEW_ROUTES:
+            _invalidate_data_views()
         current_route = _normalize_route_path(page.route or "/home")
         if current_route not in {"/", "/login"} and current_route != target_route:
             history = state.setdefault("route_history", [])
@@ -6380,6 +6468,42 @@ def main(page: ft.Page):
             if len(history) > 80:
                 del history[:-80]
         page.go(target_route)
+
+    # ---- Mapa de rotas mais provaveis a partir de cada rota ----
+    _PRELOAD_MAP = {
+        "/home": ["/mais", "/stats"],
+        "/quiz": ["/home", "/stats"],
+        "/flashcards": ["/home"],
+        "/mais": ["/stats", "/profile", "/ranking"],
+        "/stats": ["/home"],
+        "/library": ["/home"],
+    }
+
+    # Builders de body por rota (preenchido no route_change)
+    _BODY_BUILDERS = {}
+
+    async def _preload_routes(current_route: str):
+        """Pre-constroi views provaveis em background para navegacao instantanea."""
+        targets = _PRELOAD_MAP.get(current_route, [])
+        if not targets:
+            return
+        cache = state.get("view_cache")
+        if cache is None:
+            return
+        dark = state.get("tema_escuro", False)
+        for target in targets:
+            if target in cache:
+                continue  # ja cacheada
+            builder = _BODY_BUILDERS.get(target)
+            if not builder:
+                continue
+            try:
+                body = builder(state, navigate, dark)
+                view = _build_shell_view(page, state, target, body, on_logout, dark, toggle_dark)
+                _sanitize_control_texts(view)
+                cache[target] = view
+            except Exception:
+                pass
 
     async def _sync_cloud_quiz_summary_once(force: bool = False) -> bool:
         if state.get("summary_sync_inflight"):
@@ -6411,6 +6535,7 @@ def main(page: ft.Page):
                 "today_acertos": int((summary_raw or {}).get("today_acertos") or 0),
                 "today_xp": int((summary_raw or {}).get("today_xp") or 0),
                 "streak_dias": int((summary_raw or {}).get("streak_dias") or 0),
+                "last_activity_day": str((summary_raw or {}).get("last_activity_day") or "").strip() or None,
             }
             await asyncio.to_thread(
                 db_ref.sync_cloud_quiz_totals,
@@ -6421,6 +6546,7 @@ def main(page: ft.Page):
                 int(summary.get("today_questoes") or 0),
                 int(summary.get("today_acertos") or 0),
                 int(summary.get("streak_dias") or 0),
+                summary.get("last_activity_day"),
             )
             prev_sig = str(state.get("stats_summary_signature") or "")
             next_sig = json.dumps(summary, ensure_ascii=True, sort_keys=True)
@@ -6436,7 +6562,9 @@ def main(page: ft.Page):
                 state["usuario"]["acertos"] = max(prev_local[1], int(summary.get("total_acertos") or 0))
                 state["usuario"]["xp"] = max(prev_local[2], int(summary.get("total_xp") or 0))
                 prev_streak = int(state["usuario"].get("streak_dias", 0) or 0)
-                state["usuario"]["streak_dias"] = max(prev_streak, int(summary.get("streak_dias") or 0))
+                state["usuario"]["streak_dias"] = max(0, int(summary.get("streak_dias") or 0))
+                if summary.get("last_activity_day"):
+                    state["usuario"]["ultima_atividade"] = summary.get("last_activity_day")
                 changed = changed or prev_local != (
                     int(state["usuario"].get("total_questoes", 0) or 0),
                     int(state["usuario"].get("acertos", 0) or 0),
@@ -6596,8 +6724,9 @@ def main(page: ft.Page):
         if not (refresh_ui and (stats_changed or settings_changed)):
             return
         try:
+            _invalidate_data_views()
             current_route = _normalize_route_path(page.route or "/home")
-            if current_route in {"/home", "/stats", "/profile", "/mais"}:
+            if current_route in _DATA_VIEW_ROUTES:
                 route_change(None)
             elif current_route == "/settings":
                 page.update()
@@ -6669,6 +6798,7 @@ def main(page: ft.Page):
                     int((summary or {}).get("today_questoes") or 0),
                     int((summary or {}).get("today_acertos") or 0),
                     int((summary or {}).get("streak_dias") or 0),
+                    str((summary or {}).get("last_activity_day") or "").strip() or None,
                 )
                 if state.get("usuario") and int((state["usuario"] or {}).get("id") or 0) == int(local_user_id):
                     state["usuario"]["total_questoes"] = max(
@@ -6683,10 +6813,9 @@ def main(page: ft.Page):
                         int(state["usuario"].get("xp", 0) or 0),
                         int((summary or {}).get("total_xp") or 0),
                     )
-                    state["usuario"]["streak_dias"] = max(
-                        int(state["usuario"].get("streak_dias", 0) or 0),
-                        int((summary or {}).get("streak_dias") or 0),
-                    )
+                    state["usuario"]["streak_dias"] = max(0, int((summary or {}).get("streak_dias") or 0))
+                    if (summary or {}).get("last_activity_day"):
+                        state["usuario"]["ultima_atividade"] = str((summary or {}).get("last_activity_day") or "").strip()
             except Exception as ex_summary:
                 log_exception(ex_summary, "main._sync_subscription_after_login_async.summary")
         except Exception as ex:
@@ -7018,10 +7147,14 @@ def main(page: ft.Page):
                 except Exception as ex_ensure:
                     log_exception(ex_ensure, "main.route_change.ensure_stats_sync_task")
             if route in {"/home", "/stats", "/profile", "/mais", "/settings"}:
-                try:
-                    page.run_task(_sync_cross_device_snapshot_once, True, True)
-                except Exception as ex_sync:
-                    log_exception(ex_sync, "main.route_change.schedule_cross_device_sync")
+                _now_mono = time.monotonic()
+                _last_route_sync = float(state.get("_last_route_sync_ts") or 0.0)
+                if (_now_mono - _last_route_sync) >= 5.0:
+                    state["_last_route_sync_ts"] = _now_mono
+                    try:
+                        page.run_task(_sync_cross_device_snapshot_once, True, True)
+                    except Exception as ex_sync:
+                        log_exception(ex_sync, "main.route_change.schedule_cross_device_sync")
 
             dark = state.get("tema_escuro", False)
             # invalida cache se tema mudou
@@ -7033,6 +7166,15 @@ def main(page: ft.Page):
             view = cache.get(route)
 
             if view is None:
+                # Registrar builders para preload preditivo (apenas rotas cacheaveis)
+                if not _BODY_BUILDERS:
+                    _BODY_BUILDERS["/home"] = _ext_build_home_body
+                    _BODY_BUILDERS["/stats"] = _ext_build_stats_body
+                    _BODY_BUILDERS["/profile"] = _ext_build_profile_body
+                    _BODY_BUILDERS["/mais"] = lambda s, n, d: _ext_build_mais_body(s, n, d, on_logout, toggle_dark)
+                    _BODY_BUILDERS["/ranking"] = _ext_build_ranking_body
+                    _BODY_BUILDERS["/conquistas"] = _ext_build_conquistas_body
+
                 if route == "/home":
                     body = _ext_build_home_body(state, navigate, dark)
                 elif route == "/quiz":
@@ -7072,30 +7214,21 @@ def main(page: ft.Page):
                     return
 
                 view = _build_shell_view(page, state, route, body, on_logout, dark, toggle_dark)
-                form_heavy_routes = {
-                    "/quiz",
-                    "/flashcards",
-                    "/open-quiz",
-                    "/study-plan",
-                    "/settings",
-                    "/plans",
-                    "/simulado",
-                    "/library",
-                }
+                form_heavy_routes = {"/quiz", "/flashcards", "/open-quiz", "/study-plan",
+                                     "/settings", "/plans", "/simulado", "/library"}
                 if route in form_heavy_routes:
                     _style_form_controls(view, dark)
                 _sanitize_control_texts(view)
+
                 # Rotas dinamicas nao devem ser cacheadas (estado interno muda)
-                _no_cache_routes = {"/home", "/stats", "/profile",
-                                    "/quiz", "/flashcards", "/open-quiz", "/settings", "/library",
+                _no_cache_routes = {"/quiz", "/flashcards", "/open-quiz", "/settings", "/library",
                                     "/revisao", "/revisao/sessao", "/revisao/erros", "/revisao/marcadas",
-                                    "/mais", "/simulado"}
+                                    "/simulado", "/study-plan"}
                 if route not in _no_cache_routes:
                     cache[route] = view
 
-            # Evita piscadas: sÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â³ troca se for outra instÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ncia
+            # Evita piscadas: so atualiza se for outra view
             if page.views and page.views[-1] is view:
-                log_event("route_cached", route)
                 return
             try:
                 view.can_pop = False
@@ -7110,6 +7243,13 @@ def main(page: ft.Page):
             page.update()
             log_event("route", route)
             log_state("state_after_route")
+
+            # Preload preditivo em background
+            if route in _PRELOAD_MAP:
+                try:
+                    page.run_task(_preload_routes, route)
+                except Exception:
+                    pass
         except Exception as ex:
             import traceback
             print(f"\n{'='*60}")

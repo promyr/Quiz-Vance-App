@@ -577,7 +577,7 @@ def build_open_quiz_body(state: dict, navigate, dark: bool) -> ft.Control:
                     ft.Container(
                         col={"xs": 12, "md": 12},
                         content=ds_card(
-                            dark=dark, padding=12, expand=True, width=study_card_width,
+                            dark=dark, padding=8, expand=True,
                             content=ft.Container(
                                 height=max(200, min(340, int(screen_h * 0.38))),
                                 content=ft.Column(
@@ -596,7 +596,7 @@ def build_open_quiz_body(state: dict, navigate, dark: bool) -> ft.Control:
                     ft.Container(
                         col={"xs": 12, "md": 12},
                         content=ds_card(
-                            dark=dark, padding=12, expand=True, width=study_card_width,
+                            dark=dark, padding=8, expand=True,
                             content=ft.Column(
                                 [
                                     ft.Text("Sua resposta", size=12, weight=ft.FontWeight.W_600, color=_color("texto_sec", dark)),
@@ -610,14 +610,16 @@ def build_open_quiz_body(state: dict, navigate, dark: bool) -> ft.Control:
                 spacing=10, run_spacing=10,
             ),
             escala_text,
-            ds_action_bar(
+            ft.Row([ft.Container(content=ds_btn_primary("3) Corrigir Avaliação", icon=ft.Icons.CHECK, on_click=_on_corrigir_click, dark=dark), expand=True)]),
+            ft.Row(
                 [
-                    {"label": "3) Corrigir", "icon": ft.Icons.CHECK, "on_click": _on_corrigir_click, "kind": "primary"},
-                    {"label": "Limpar", "icon": ft.Icons.RESTART_ALT, "on_click": limpar, "kind": "ghost"},
-                    {"label": "Voltar para geracao", "icon": ft.Icons.ARROW_BACK, "on_click": _voltar_geracao, "kind": "ghost"},
-                    {"label": "Voltar ao Inicio", "icon": ft.Icons.HOME_OUTLINED, "on_click": lambda _: navigate("/home"), "kind": "ghost"},
+                    ft.TextButton("Limpar", icon=ft.Icons.RESTART_ALT, on_click=limpar),
+                    ft.TextButton("Refazer Geração", icon=ft.Icons.ARROW_BACK, on_click=_voltar_geracao),
+                    ft.TextButton("Início", icon=ft.Icons.HOME_OUTLINED, on_click=lambda _: navigate("/home"))
                 ],
-                dark=dark,
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=15,
+                wrap=True
             ),
             gabarito_text,
         ],

@@ -285,7 +285,7 @@ class AuthRepository:
                 cursor.execute(
                     """
                     UPDATE usuarios
-                    SET backend_user_id = ?, nome = ?, email = ?, ultima_atividade = DATE('now','localtime')
+                    SET backend_user_id = ?, nome = ?, email = ?
                     WHERE id = ?
                     """,
                     (int(backend_user_id or 0), nome_clean, email_clean, user_id),
@@ -296,7 +296,7 @@ class AuthRepository:
                     """
                     INSERT INTO usuarios
                     (backend_user_id, nome, email, senha, idade, avatar, ultima_atividade, onboarding_seen)
-                    VALUES (?, ?, ?, ?, ?, ?, DATE('now','localtime'), 0)
+                    VALUES (?, ?, ?, ?, ?, ?, NULL, 0)
                     """,
                     (int(backend_user_id or 0), nome_clean, email_clean,
                      self._hash_password(pwd_seed), 18, "user"),
