@@ -312,10 +312,12 @@ class Database:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS banco_questoes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
                 tema TEXT NOT NULL,
                 dificuldade TEXT NOT NULL,
                 dados_json TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES usuarios (id)
             )
         """)
 
@@ -618,6 +620,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_stats_sync_uid ON stats_sync_queue(user_id)",
             # banco_questoes
             "CREATE INDEX IF NOT EXISTS idx_banco_questoes_tema ON banco_questoes(tema)",
+            "CREATE INDEX IF NOT EXISTS idx_banco_questoes_uid_tema_diff ON banco_questoes(user_id, tema, dificuldade)",
         ]
         for idx_sql in _indices:
             try:
@@ -661,6 +664,10 @@ class Database:
                 cursor.execute("ALTER TABLE questoes_usuario ADD COLUMN last_attempt_at DATETIME")
             if "last_result" not in q_cols:
                 cursor.execute("ALTER TABLE questoes_usuario ADD COLUMN last_result TEXT")
+        cursor.execute("PRAGMA table_info(banco_questoes)")
+        bq_cols = {row[1] for row in cursor.fetchall()}
+        if bq_cols and "user_id" not in bq_cols:
+            cursor.execute("ALTER TABLE banco_questoes ADD COLUMN user_id INTEGER")
         cursor.execute("PRAGMA table_info(mock_exam_sessions)")
         ms_cols = {row[1] for row in cursor.fetchall()}
         if ms_cols and "progress_json" not in ms_cols:
@@ -2486,15 +2493,16 @@ class Database:
         payload = json.dumps(base, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def salvar_questao_cache(self, tema: str, dificuldade: str, questao: Dict) -> None:
+    def salvar_questao_cache(self, tema: str, dificuldade: str, questao: Dict, user_id: Optional[int] = None) -> None:
         conn = self.conectar()
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO banco_questoes (tema, dificuldade, dados_json)
-            VALUES (?, ?, ?)
+            INSERT INTO banco_questoes (user_id, tema, dificuldade, dados_json)
+            VALUES (?, ?, ?, ?)
             """,
             (
+                int(user_id) if user_id else None,
                 str((tema or "Geral").strip() or "Geral"),
                 str((dificuldade or "intermediario").strip() or "intermediario"),
                 json.dumps(questao, ensure_ascii=False),
@@ -2503,25 +2511,45 @@ class Database:
         conn.commit()
         conn.close()
 
-    def listar_questoes_cache(self, tema: str, dificuldade: str, limite: int = 10) -> List[Dict]:
+    def listar_questoes_cache(self, tema: str, dificuldade: str, limite: int = 10, user_id: Optional[int] = None) -> List[Dict]:
         conn = self.conectar()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT dados_json
-            FROM banco_questoes
-            WHERE lower(tema) = lower(?)
-              AND lower(dificuldade) = lower(?)
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (
-                str((tema or "Geral").strip() or "Geral"),
-                str((dificuldade or "intermediario").strip() or "intermediario"),
-                int(max(1, limite)),
-            ),
-        )
+        if user_id:
+            cursor.execute(
+                """
+                SELECT dados_json
+                FROM banco_questoes
+                WHERE user_id = ?
+                  AND lower(tema) = lower(?)
+                  AND lower(dificuldade) = lower(?)
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (
+                    int(user_id),
+                    str((tema or "Geral").strip() or "Geral"),
+                    str((dificuldade or "intermediario").strip() or "intermediario"),
+                    int(max(1, limite)),
+                ),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT dados_json
+                FROM banco_questoes
+                WHERE user_id IS NULL
+                  AND lower(tema) = lower(?)
+                  AND lower(dificuldade) = lower(?)
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (
+                    str((tema or "Geral").strip() or "Geral"),
+                    str((dificuldade or "intermediario").strip() or "intermediario"),
+                    int(max(1, limite)),
+                ),
+            )
         rows = cursor.fetchall()
         conn.close()
         out = []

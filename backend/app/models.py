@@ -130,3 +130,53 @@ class QuizStatsEvent(Base):
         UniqueConstraint("user_id", "event_id", name="uq_quiz_stats_event_user"),
         Index("ix_quiz_stats_events_user_created", "user_id", "created_at"),
     )
+
+
+
+class TelegramCommunityConfig(Base):
+    __tablename__ = "telegram_community_config"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    atualizacoes_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    comece_aqui_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bate_papo_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    resultados_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    suporte_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    feedbacks_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class TelegramDailyPostLog(Base):
+    __tablename__ = "telegram_daily_post_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    day_key: Mapped[date] = mapped_column(nullable=False, unique=True, index=True)
+    topic_key: Mapped[str] = mapped_column(String(40), default="atualizacoes")
+    chat_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    message_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    post_text: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class TelegramInstructionPostLog(Base):
+    __tablename__ = "telegram_instruction_post_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    day_key: Mapped[date] = mapped_column(nullable=False, index=True)
+    slot_key: Mapped[str] = mapped_column(String(40), default="18:00", nullable=False)
+    topic_key: Mapped[str] = mapped_column(String(40), default="comece_aqui")
+    chat_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    message_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    post_text: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (UniqueConstraint("day_key", "slot_key", name="uq_telegram_instruction_post_log_day_slot"),)

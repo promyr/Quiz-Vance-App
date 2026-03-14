@@ -22,6 +22,16 @@ set TELEGRAM_BOT_TOKEN=123456:ABCDEF
 set TELEGRAM_WEBHOOK_SECRET=telegram-webhook-secret
 set TELEGRAM_COMMUNITY_INVITE_URL=https://t.me/seu_grupo
 set TELEGRAM_DOWNLOAD_URL=https://seu-servidor.com/quiz-vance.apk
+set TELEGRAM_COMMUNITY_CHAT_ID=-100SEU_CHAT_ID
+set TELEGRAM_COMMUNITY_UPDATES_THREAD_ID=123
+set TELEGRAM_AUTO_POST_ENABLED=1
+set TELEGRAM_AUTO_POST_TIMEZONE=America/Sao_Paulo
+set TELEGRAM_AUTO_POST_HOUR=9
+set TELEGRAM_AUTO_POST_MINUTE=0
+set TELEGRAM_INSTRUCTION_POST_ENABLED=1
+set TELEGRAM_INSTRUCTION_POST_TIMES=12:00,18:00
+set TELEGRAM_INSTRUCTION_POST_HOUR=18
+set TELEGRAM_INSTRUCTION_POST_MINUTE=0
 ```
 
 Run:
@@ -115,6 +125,9 @@ python scripts/telegram_setup.py set-webhook --public-base-url https://quiz-vanc
 - O backend ainda aceita aliases operacionais como `planos`, `regras`, `comercial` e `estrategia`.
 - O grupo pode ser provisionado como forum com topicos no padrao comercial: `Atualizacoes`, `Comece aqui`, `Bate-papo`, `Resultados`, `Suporte/Ajuda` e `Feedbacks/Inovacoes`.
 - O backend pode mandar alertas de checkout e pagamento para um chat interno no Telegram.
+- O grupo provisionado agora salva o chat/thread para postagem automatica diaria; se o grupo ja existia antes dessa mudanca, depois do deploy basta o bot receber uma primeira mensagem/comando no grupo ou, se preferir, voce pode configurar `TELEGRAM_COMMUNITY_CHAT_ID` e `TELEGRAM_COMMUNITY_UPDATES_THREAD_ID`.
+- O scheduler diario usa `TELEGRAM_AUTO_POST_*` e publica 1 CTA promocional por dia no grupo.
+- A trilha educativa usa `TELEGRAM_INSTRUCTION_POST_TIMES` (ou `TELEGRAM_INSTRUCTION_POST_HOUR/MINUTE` como fallback) e publica rotacoes de cadastro, API key, configuracao e operacao geral no topico adequado da comunidade.
 - Guia operacional completo: `../docs/TELEGRAM_COMMERCIAL_GROUP.md`
 - Playbook de crescimento: `../docs/TELEGRAM_GROWTH_PLAYBOOK.md`
 - Refresh operacional pronto para postar: `../docs/TELEGRAM_REFRESH_OPERACIONAL.md`

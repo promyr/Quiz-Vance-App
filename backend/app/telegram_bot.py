@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
+import json
+from pathlib import Path
+from zoneinfo import ZoneInfo
 import logging
 import os
 from typing import Any
@@ -30,8 +34,16 @@ class ForumTopicBlueprint:
     pin_starter: bool = True
 
 
+@dataclass(frozen=True)
+class DailyCommunityPost:
+    topic_key: str
+    text: str
+    image_path: str = ""
+
+
 DEFAULT_COMMANDS = [
     {"command": "start", "description": "Abrir menu principal"},
+    {"command": "comecar", "description": "Ver o passo a passo ate o cadastro"},
     {"command": "baixar", "description": "Receber o link do app"},
     {"command": "oferta", "description": "Ver oferta beta atual"},
     {"command": "resultados", "description": "Ver prova social"},
@@ -50,6 +62,8 @@ Principios:
 - vender com clareza, nao com spam;
 - responder com senso de dono, energia comercial e utilidade pratica;
 - conduzir novos membros para download, teste rapido, comunidade e oferta;
+- publicar pelo menos 1 postagem por dia com CTA claro e objetivo unico;
+- repetir o caminho ate o APK e o cadastro sem assumir que o usuario entendeu sozinho;
 - transformar resultados dos usuarios em prova social;
 - transformar duvidas recorrentes em melhorias do produto;
 - manter a comunidade organizada por topicos e CTAs objetivos.
@@ -73,13 +87,13 @@ DEFAULT_GROUP_BLUEPRINT = [
         icon_color=DEFAULT_TOPIC_COLORS["yellow"],
         starter_text=(
             "Seja bem-vindo ao ecossistema Quiz Vance.\n\n"
-            "Passo rapido para entrar rodando:\n"
-            "1. Use /baixar para instalar o app no Android.\n"
-            "2. Use /oferta para ver a proposta beta atual.\n"
-            "3. Use /resultados para entender o valor na pratica.\n"
-            "4. Use /faq para tirar duvidas rapidas.\n"
-            "5. Use /suporte se travar em instalacao, login ou pagamento.\n"
-            "6. Por enquanto o app esta disponivel apenas para Android.\n"
+            "Fluxo simples para nao se perder:\n"
+            "1. Use /comecar para ver o passo a passo.\n"
+            "2. Use /baixar para chegar no APK.\n"
+            "3. Instale o app no Android.\n"
+            "4. Abra o app e toque em Criar conta/Cadastrar.\n"
+            "5. Depois veja /oferta, /resultados e /faq.\n"
+            "6. Se travar em instalacao, login ou pagamento, use /suporte.\n"
             "7. Leia /regras antes de postar."
         ),
     ),
@@ -171,9 +185,143 @@ def group_title() -> str:
 def group_description() -> str:
     value = str(
         os.getenv("TELEGRAM_GROUP_DESCRIPTION")
-        or "Comunidade oficial do Quiz Vance: atualizacoes, resultados, suporte e oferta do app."
+        or (
+            "Comunidade oficial do Quiz Vance. Entrou agora? Use /comecar, baixe o APK, "
+            "instale no Android e crie sua conta. Depois veja resultados, suporte e oferta beta."
+        )
     ).strip()
     return value[:255]
+
+
+def _coerce_chat_id(raw: str) -> int | str | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    if value.lstrip("-").isdigit():
+        return int(value)
+    return value
+
+
+def normalize_chat_id(value: int | str | None) -> str:
+    parsed = _coerce_chat_id(str(value or ""))
+    return str(parsed or "").strip()
+
+
+def community_chat_id() -> int | str | None:
+    return _coerce_chat_id(str(os.getenv("TELEGRAM_COMMUNITY_CHAT_ID") or "").strip())
+
+
+def community_updates_thread_id() -> int | None:
+    raw = str(
+        os.getenv("TELEGRAM_COMMUNITY_UPDATES_THREAD_ID")
+        or os.getenv("TELEGRAM_COMMUNITY_DAILY_THREAD_ID")
+        or ""
+    ).strip()
+    if raw.isdigit():
+        return int(raw)
+    return None
+
+
+def auto_post_enabled() -> bool:
+    raw = str(os.getenv("TELEGRAM_AUTO_POST_ENABLED") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def auto_post_timezone_name() -> str:
+    value = str(os.getenv("TELEGRAM_AUTO_POST_TIMEZONE") or "America/Sao_Paulo").strip()
+    return value or "America/Sao_Paulo"
+
+
+def auto_post_zoneinfo() -> ZoneInfo:
+    try:
+        return ZoneInfo(auto_post_timezone_name())
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+def auto_post_hour() -> int:
+    try:
+        return max(0, min(23, int(os.getenv("TELEGRAM_AUTO_POST_HOUR") or 9)))
+    except Exception:
+        return 9
+
+
+def auto_post_minute() -> int:
+    try:
+        return max(0, min(59, int(os.getenv("TELEGRAM_AUTO_POST_MINUTE") or 0)))
+    except Exception:
+        return 0
+
+
+def instruction_post_enabled() -> bool:
+    raw = str(
+        os.getenv("TELEGRAM_INSTRUCTION_POST_ENABLED")
+        or os.getenv("TELEGRAM_GUIDE_POST_ENABLED")
+        or "1"
+    ).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _parse_clock_time(raw: str) -> tuple[int, int] | None:
+    token = str(raw or "").strip()
+    if not token:
+        return None
+    parts = token.split(":", 1)
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+    except Exception:
+        return None
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return hour, minute
+
+
+def instruction_post_times() -> list[tuple[int, int]]:
+    raw = str(os.getenv("TELEGRAM_INSTRUCTION_POST_TIMES") or "").strip()
+    parsed: list[tuple[int, int]] = []
+    if raw:
+        for chunk in raw.split(","):
+            slot = _parse_clock_time(chunk)
+            if slot and slot not in parsed:
+                parsed.append(slot)
+        if parsed:
+            return sorted(parsed)
+
+    legacy_hour = str(os.getenv("TELEGRAM_INSTRUCTION_POST_HOUR") or "").strip()
+    legacy_minute = str(os.getenv("TELEGRAM_INSTRUCTION_POST_MINUTE") or "").strip()
+    if legacy_hour or legacy_minute:
+        slot = _parse_clock_time(f"{legacy_hour or '18'}:{legacy_minute or '0'}")
+        if slot:
+            return [slot]
+
+    return [(12, 0), (18, 0)]
+
+
+def instruction_post_times_labels() -> list[str]:
+    return [f"{hour:02d}:{minute:02d}" for hour, minute in instruction_post_times()]
+
+
+def instruction_post_hour() -> int:
+    return int(instruction_post_times()[0][0])
+
+
+def instruction_post_minute() -> int:
+    return int(instruction_post_times()[0][1])
+
+
+def auto_post_poll_seconds() -> int:
+    try:
+        return max(30, int(os.getenv("TELEGRAM_AUTO_POST_POLL_SECONDS") or 60))
+    except Exception:
+        return 60
+
+
+def auto_post_retry_minutes() -> int:
+    try:
+        return max(5, int(os.getenv("TELEGRAM_AUTO_POST_RETRY_MINUTES") or 20))
+    except Exception:
+        return 20
 
 
 def alert_chat_id() -> int | str | None:
@@ -197,6 +345,143 @@ def _compact_lines(*parts: str) -> str:
     return "\n".join(cleaned)
 
 
+def _app_asset_path(*parts: str) -> str:
+    return str(Path(__file__).resolve().parent.joinpath(*parts))
+
+
+AUTOMATED_DAILY_POSTS = [
+    DailyCommunityPost(
+        topic_key="comece_aqui",
+        text=_compact_lines(
+            "Bom dia. Se voce quer sair da enrolacao hoje, use o Quiz Vance agora.",
+            "Comece em /comecar, pegue o APK em /baixar, instale no Android e toque em Criar conta/Cadastrar.",
+            "Se travar em qualquer etapa, use /suporte.",
+        ),
+    ),
+    DailyCommunityPost(
+        topic_key="resultados",
+        text=_compact_lines(
+            "Seu estudo de hoje pode comecar em poucos minutos com o app.",
+            "Baixe, entre, resolva questoes e depois volte aqui para postar seu print em Resultados.",
+        ),
+    ),
+    DailyCommunityPost(
+        topic_key="atualizacoes",
+        text=_compact_lines(
+            "Quem usa o Quiz Vance todos os dias sente mais ritmo e menos dispersao.",
+            "Se voce ainda nao entrou no app, /comecar e /baixar resolvem isso hoje.",
+        ),
+    ),
+    DailyCommunityPost(
+        topic_key="bate_papo",
+        text=_compact_lines(
+            "Meta do dia: abrir o app, fazer algumas questoes e manter o ritmo de estudo vivo.",
+            "Quem ja conseguiu usar hoje responde aqui; quem travou em instalacao ou cadastro chama em /suporte.",
+        ),
+    ),
+    DailyCommunityPost(
+        topic_key="comece_aqui",
+        text=_compact_lines(
+            "Nao deixa o grupo virar so leitura. Usa o app hoje e sente a experiencia na pratica.",
+            "Fluxo rapido: /comecar, /baixar, instalar o APK, abrir o app e tocar em Criar conta/Cadastrar.",
+        ),
+    ),
+    DailyCommunityPost(
+        topic_key="atualizacoes",
+        text=_compact_lines(
+            "Se voce quer revisar, responder questoes e estudar com direcao, o app foi feito para isso.",
+            "Comece agora em /comecar, baixe em /baixar e testa hoje mesmo.",
+        ),
+    ),
+    DailyCommunityPost(
+        topic_key="resultados",
+        text=_compact_lines(
+            "Fechamento da semana: se voce ainda nao usou o Quiz Vance, hoje e o dia de instalar e criar sua conta.",
+            "Use /baixar, entra no app e depois conta aqui como foi seu primeiro uso.",
+        ),
+    ),
+]
+
+
+INSTRUCTIONAL_VISUAL_POSTS = [
+    DailyCommunityPost(
+        topic_key="comece_aqui",
+        text=_compact_lines(
+            "Checklist visual de hoje: baixar, instalar e criar a conta.",
+            "Use /baixar, instale o APK no Android e toque em Criar conta/Cadastrar assim que abrir o app.",
+            "Se travar em instalacao ou cadastro, chame em /suporte.",
+        ),
+        image_path=_app_asset_path("assets", "telegram_posts", "cadastro_android.png"),
+    ),
+    DailyCommunityPost(
+        topic_key="suporte",
+        text=_compact_lines(
+            "Configuracao visual da IA em 1 minuto.",
+            "Abra Configuracoes, escolha o Provider IA, revise o Modelo padrao e depois entre em Configurar chaves por provider.",
+            "Se a chave nao funcionar, mande print em /suporte com o provider ativo.",
+        ),
+        image_path=_app_asset_path("assets", "telegram_posts", "configuracao_ia.png"),
+    ),
+    DailyCommunityPost(
+        topic_key="comece_aqui",
+        text=_compact_lines(
+            "Fluxo visual do primeiro uso no app.",
+            "Entre, configure provider/modelo/chave e so depois gere questoes ou flashcards.",
+            "Quando tiver contexto real, o app rende muito melhor.",
+        ),
+        image_path=_app_asset_path("assets", "telegram_posts", "primeiro_uso.png"),
+    ),
+    DailyCommunityPost(
+        topic_key="suporte",
+        text=_compact_lines(
+            "Checklist de suporte para resolver mais rapido.",
+            "Se algo falhar, envie print, provider, modelo e o passo exato em que travou.",
+            "Com isso a equipe consegue orientar sem adivinhacao.",
+        ),
+        image_path=_app_asset_path("assets", "telegram_posts", "suporte_checklist.png"),
+    ),
+]
+
+
+INSTRUCTIONAL_DETAILED_POSTS = [
+    DailyCommunityPost(
+        topic_key="comece_aqui",
+        text=_compact_lines(
+            "Tutorial completo de cadastro no Quiz Vance.",
+            "1. Use /baixar para pegar o APK. 2. No Android, autorize a instalacao quando o sistema pedir. 3. Abra o app e toque em Criar conta/Cadastrar.",
+            "4. Preencha Nome completo, ID, Senha e Data de nascimento. 5. Finalize e use Fazer login para entrar com os dados que acabou de criar.",
+            "Erros comuns: fechar o app antes de concluir o cadastro, esquecer de permitir a instalacao do APK ou achar que entrar no grupo ja cria a conta. O cadastro so termina dentro do app.",
+        ),
+    ),
+    DailyCommunityPost(
+        topic_key="suporte",
+        text=_compact_lines(
+            "Como criar e salvar sua API key sem confusao.",
+            "1. Abra Configuracoes. 2. Toque em Configurar chaves por provider. 3. Escolha o provider que voce realmente vai usar. 4. Use Criar chave ou Abrir portal de chave.",
+            "5. Copie a chave gerada, cole no campo API key e toque em Salvar chave. Depois volte e confirme se o Provider IA ativo bate com a chave que voce colou.",
+            "Erros comuns: colar chave do provider errado, esquecer de salvar, usar chave sem saldo/cota ou trocar o provider e achar que a chave antiga vale para todos.",
+        ),
+    ),
+    DailyCommunityPost(
+        topic_key="comece_aqui",
+        text=_compact_lines(
+            "Operacao geral recomendada para o primeiro estudo no app.",
+            "1. Entre na conta. 2. Abra Configuracoes. 3. Ajuste provider, modelo e API key. 4. Volte para Quiz ou Flashcards. 5. Informe um topico real ou anexe material antes de gerar conteudo.",
+            "6. Responda as questoes, revise erros e acompanhe a evolucao. Se quiser prova social e dicas, volte para a comunidade e acompanhe os topicos.",
+            "Atalho mental: conta criada, IA configurada, contexto definido, estudo liberado.",
+        ),
+    ),
+    DailyCommunityPost(
+        topic_key="suporte",
+        text=_compact_lines(
+            "Como pedir ajuda tecnica de um jeito que acelera a solucao.",
+            "Quando algo falhar, mande no topico de suporte: print do erro, provider ativo, modelo selecionado, o que voce estava tentando fazer e em qual tela travou.",
+            "Se o problema for geracao de questoes, diga tambem se voce informou topico ou anexou material. Isso evita diagnostico incompleto e reduz muito o vai-e-volta.",
+        ),
+    ),
+]
+
+
 def marketing_manager_directive() -> str:
     return MARKETING_MANAGER_DIRECTIVE
 
@@ -213,19 +498,60 @@ def build_operational_refresh_pack() -> dict[str, Any]:
             {"name": "Feedbacks/Inovacoes", "message": DEFAULT_GROUP_BLUEPRINT[5].starter_text},
         ],
         "daily_posts": [
-            "Dia 1: reforce o Comece aqui com CTA para /baixar e /oferta.",
-            "Dia 2: puxe um print ou depoimento em Resultados.",
-            "Dia 3: poste melhoria nova em Atualizacoes.",
-            "Dia 4: chame a base para compartilhar rotina em Bate-papo.",
-            "Dia 5: levante uma pergunta de produto em Feedbacks/Inovacoes.",
-            "Dia 6: recircule a oferta beta com CTA curto.",
-            "Dia 7: compile melhores resultados da semana.",
+            "Dia 1: Quem entrou hoje e ainda nao instalou: use /comecar e /baixar agora. O caminho e simples: baixar APK, instalar no Android, abrir o app e tocar em Criar conta/Cadastrar.",
+            "Dia 2: Poste um print ou depoimento real em Resultados e feche com CTA: quer testar tambem? /baixar e /faq.",
+            "Dia 3: Publique uma melhoria nova em Atualizacoes e termine com: se ainda nao entrou no app, comece em /comecar.",
+            "Dia 4: Abra um topico no Bate-papo perguntando quem ja instalou e quem ainda travou no cadastro. Direcione os travados para /suporte.",
+            "Dia 5: Reforce o passo a passo no Comece aqui: APK, instalacao, cadastro, primeiro login e teste rapido. CTA final: /baixar.",
+            "Dia 6: Recircule a oferta beta com uma frase curta de urgencia e lembre que antes da oferta o usuario precisa baixar e criar a conta no app.",
+            "Dia 7: Faca resumo da semana com melhores resultados e uma chamada direta: entrou no grupo e ainda nao baixou? /comecar agora.",
+        ],
+        "instructional_posts": [
+            "Cadastro: /baixar, instalar APK, abrir o app, tocar em Criar conta, preencher Nome completo/ID/Senha/Data de nascimento e depois Fazer login.",
+            "Configuracoes: antes de estudar com IA, escolher Provider IA, revisar Modelo padrao e abrir Configurar chaves por provider.",
+            "API key: usar Criar chave Gemini/OpenAI/Groq, depois colar em API key e finalizar em Salvar chave.",
+            "Operacao geral: entrar no app, configurar provider/modelo/chave e entao usar Quiz ou Flashcards pelo menu.",
         ],
     }
 
 
+def automated_daily_posts() -> list[DailyCommunityPost]:
+    return list(AUTOMATED_DAILY_POSTS)
+
+
+def build_automated_daily_post(day_key: date | None = None) -> DailyCommunityPost:
+    posts = automated_daily_posts()
+    ref_day = day_key or date.today()
+    index = (ref_day.toordinal() - 1) % len(posts)
+    return posts[index]
+
+
+def _primary_instruction_slot_label() -> str:
+    labels = instruction_post_times_labels()
+    return labels[0] if labels else "12:00"
+
+
+def instructional_posts(slot_key: str = "") -> list[DailyCommunityPost]:
+    resolved_slot = str(slot_key or _primary_instruction_slot_label()).strip()
+    if resolved_slot == _primary_instruction_slot_label():
+        return list(INSTRUCTIONAL_VISUAL_POSTS)
+    return list(INSTRUCTIONAL_DETAILED_POSTS)
+
+
+def build_instructional_post(day_key: date | None = None, slot_key: str = "") -> DailyCommunityPost:
+    posts = instructional_posts(slot_key)
+    ref_day = day_key or date.today()
+    index = (ref_day.toordinal() - 1) % len(posts)
+    return posts[index]
+
+
+def default_reply_markup() -> dict[str, list[list[dict[str, str]]]]:
+    return _menu_keyboard()
+
+
 def _menu_keyboard() -> dict[str, list[list[dict[str, str]]]]:
     rows: list[list[dict[str, str]]] = []
+    rows.append([{"text": "Comecar agora", "callback_data": "menu:comecar"}])
 
     if download_url():
         rows.append([{"text": "Baixar app", "url": download_url()}])
@@ -254,8 +580,22 @@ def _offer_message() -> str:
         "Oferta beta do Quiz Vance",
         "Acesso premium_30 por R$ 9,99.",
         "Ideal para quem quer sair da enrolacao e estudar com questoes, revisao e ritmo diario.",
-        "Baixe o APK, teste hoje e, se curtir a experiencia, feche o premium sem friccao.",
+        "Antes de pensar na oferta, o caminho e: baixe o APK, instale no Android, abra o app e crie sua conta.",
+        "Depois disso, teste hoje e, se curtir a experiencia, feche o premium sem friccao.",
         f"Comercial: {sales_url()}" if sales_url() else "",
+    )
+
+
+def _quickstart_message() -> str:
+    apk = download_url()
+    return _compact_lines(
+        "Comece agora no Quiz Vance",
+        "Passo 1. Use /baixar ou o botao Baixar app para chegar no APK.",
+        "Passo 2. Instale o APK no Android e permita a instalacao quando o sistema pedir.",
+        "Passo 3. Abra o app e toque em Criar conta/Cadastrar para fazer seu registro.",
+        "Passo 4. Depois de entrar, volte aqui e use /oferta, /resultados e /faq.",
+        f"Link direto do APK: {apk}" if apk else "",
+        "Se travar em qualquer etapa, use /suporte.",
     )
 
 
@@ -267,6 +607,8 @@ def _download_message() -> str:
             f"Link do APK: {apk}",
             "Importante: nesta fase o app esta disponivel apenas para Android.",
             "Se estiver no Android, ative instalacao de fontes confiaveis quando o sistema pedir.",
+            "Depois de instalar, abra o app e toque em Criar conta/Cadastrar para concluir o registro.",
+            "Se entrou no grupo mas ainda nao se registrou, esse e o proximo passo.",
         )
     return _compact_lines(
         "O link do APK ainda nao foi configurado no backend.",
@@ -286,12 +628,14 @@ def _results_message() -> str:
 def _faq_message() -> str:
     return _compact_lines(
         "FAQ rapido",
-        "1. Como instalar? Use /baixar e habilite a instalacao quando o Android pedir.",
-        "2. Tem para iPhone ou desktop? Ainda nao. Por enquanto o app esta disponivel apenas para Android.",
-        "3. Como funciona o premium? Use /oferta para ver a proposta atual.",
-        "4. Onde tiro duvida tecnica? Use /suporte.",
-        "5. Onde vejo prova social? Use /resultados.",
-        "6. Onde acompanho a comunidade? Use /grupo.",
+        "1. Como chego no APK? Use /baixar.",
+        "2. Como instalo? Baixe o APK e habilite a instalacao quando o Android pedir.",
+        "3. Como me cadastro? Depois de instalar, abra o app e toque em Criar conta/Cadastrar.",
+        "4. Tem para iPhone ou desktop? Ainda nao. Por enquanto o app esta disponivel apenas para Android.",
+        "5. Como funciona o premium? Use /oferta para ver a proposta atual.",
+        "6. Onde tiro duvida tecnica? Use /suporte.",
+        "7. Onde vejo prova social? Use /resultados.",
+        "8. Onde acompanho a comunidade? Use /grupo.",
     )
 
 
@@ -309,6 +653,7 @@ def _group_message() -> str:
         "Comunidade oficial do Quiz Vance",
         f"Convite: {community_invite_url()}" if community_invite_url() else "",
         "Topicos principais: Atualizacoes, Comece aqui, Bate-papo, Resultados, Suporte/Ajuda e Feedbacks/Inovacoes.",
+        "Se voce entrou no grupo agora, nao pare aqui: use /comecar, pegue o APK em /baixar e faca seu cadastro no app.",
     )
 
 
@@ -340,7 +685,7 @@ def _start_message() -> str:
         f"Bem-vindo ao {bot_display_name()}",
         "Esse bot cuida da entrada comercial e da comunidade oficial do Quiz Vance.",
         "Neste momento, o app esta disponivel apenas para Android.",
-        "Se voce quer estudar com mais ritmo e menos dispersao, comece pelo APK, pela oferta beta e pelo FAQ rapido.",
+        "Se voce quer estudar com mais ritmo e menos dispersao, siga esta ordem: /comecar, /baixar, instalar, criar sua conta e depois ver /oferta.",
         "Use os botoes abaixo para entrar rapido no ecossistema.",
     )
 
@@ -395,6 +740,47 @@ class TelegramBotClient:
         if reply_markup:
             payload["reply_markup"] = reply_markup
         return dict(self.request("sendMessage", payload) or {})
+
+    def send_photo(
+        self,
+        chat_id: int | str,
+        photo: str,
+        *,
+        caption: str = "",
+        message_thread_id: int | None = None,
+        reply_markup: dict[str, Any] | None = None,
+        disable_notification: bool = False,
+    ) -> dict[str, Any]:
+        photo_value = str(photo or "").strip()
+        if not photo_value:
+            raise TelegramBotError("telegram_photo_missing")
+
+        payload: dict[str, Any] = {
+            "chat_id": str(chat_id),
+            "caption": str(caption or "").strip()[:1024],
+            "disable_notification": str(bool(disable_notification)).lower(),
+        }
+        if message_thread_id is not None:
+            payload["message_thread_id"] = str(int(message_thread_id))
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
+        photo_path = Path(photo_value)
+        if photo_path.is_file():
+            with photo_path.open("rb") as fh:
+                files = {"photo": (photo_path.name, fh, "image/png")}
+                with httpx.Client(timeout=self.timeout_seconds) as client:
+                    response = client.post(self._method_url("sendPhoto"), data=payload, files=files)
+        else:
+            payload["photo"] = photo_value
+            with httpx.Client(timeout=self.timeout_seconds) as client:
+                response = client.post(self._method_url("sendPhoto"), json=payload)
+
+        response.raise_for_status()
+        data = response.json()
+        if not bool(data.get("ok")):
+            raise TelegramBotError(str(data.get("description") or "telegram_api_error:sendPhoto"))
+        return dict(data.get("result") or {})
 
     def answer_callback_query(self, callback_query_id: str, *, text: str = "", show_alert: bool = False) -> bool:
         payload = {
@@ -537,6 +923,8 @@ def _handle_callback_query(client: TelegramBotClient, callback: dict[str, Any]) 
 
     if data == "menu:baixar":
         text = _download_message()
+    elif data == "menu:comecar":
+        text = _quickstart_message()
     elif data in {"menu:oferta", "menu:planos"}:
         text = _offer_message()
     elif data == "menu:resultados":
@@ -567,14 +955,18 @@ def _handle_message(client: TelegramBotClient, message: dict[str, Any]) -> dict[
     if message.get("new_chat_members") and chat_id is not None and chat_type in {"group", "supergroup"}:
         welcome = _compact_lines(
             "Boas-vindas ao Quiz Vance.",
-            "Use o topico Comece aqui para onboarding rapido, /oferta para entender a proposta, /resultados para ver prova social e /suporte se precisar.",
+            "Entrou agora? Faca isso sem pensar muito: /comecar, /baixar, instale o APK no Android, abra o app e toque em Criar conta/Cadastrar.",
+            "Depois use /oferta para entender a proposta, /resultados para ver prova social e /suporte se precisar.",
         )
-        client.send_message(chat_id, welcome, disable_notification=True)
+        client.send_message(chat_id, welcome, reply_markup=_menu_keyboard(), disable_notification=True)
         return {"ok": True, "handled": True, "type": "group_welcome"}
 
     alias_responses = {
         "start": _start_message(),
         "menu": _start_message(),
+        "comecar": _quickstart_message(),
+        "instalar": _quickstart_message(),
+        "cadastro": _quickstart_message(),
         "baixar": _download_message(),
         "grupo": _group_message(),
         "comunidade": _group_message(),
@@ -598,7 +990,7 @@ def _handle_message(client: TelegramBotClient, message: dict[str, Any]) -> dict[
     response = alias_responses.get(command or "start")
     if not response and text:
         response = _compact_lines(
-            "Posso te ajudar com download, oferta, resultados, grupo e suporte.",
+            "Posso te ajudar com APK, cadastro, oferta, resultados, grupo e suporte.",
             "Use os botoes abaixo para seguir.",
         )
     if not response:

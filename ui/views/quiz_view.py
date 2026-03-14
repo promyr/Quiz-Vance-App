@@ -30,7 +30,6 @@ from core.helpers.ui_helpers import close_dialog_compat, show_dialog_compat, sho
 from core.ui_text_sanitizer import _sanitize_payload_texts, _fix_mojibake_text, _sanitize_control_texts
 from core.helpers.ai_helpers import emit_opt_in_event, build_quiz_stats_event_payload
 from config import AI_PROVIDERS, CORES, DIFICULDADES
-from core.quiz_defaults import DEFAULT_QUIZ_QUESTIONS
 from core.mock_exam_runtime import (
     new_quiz_session,
     reset_runtime_state,
@@ -41,6 +40,15 @@ from core.services.mock_exam_service import MockExamService
 from core.services.mock_exam_report_service import MockExamReportService
 from core.services.quiz_filter_service import QuizFilterService
 from core.repositories.question_progress_repository import QuestionProgressRepository
+
+
+def has_quiz_generation_context(topic: str = "", referencia: Optional[list[Any]] = None) -> bool:
+    if str(topic or "").strip():
+        return True
+    if isinstance(referencia, list):
+        return any(str(item or "").strip() for item in referencia)
+    return bool(referencia)
+
 
 def build_quiz_body(state, navigate, dark: bool):
     page = state.get("page")
@@ -156,19 +164,38 @@ def build_quiz_body(state, navigate, dark: bool):
     etapa_text = ft.Text("Etapa 1 de 2: configure e gere", size=13, weight=ft.FontWeight.W_500, color=_color("texto_sec", dark))
     filtro_resumo_text = ft.Text("", size=12, color=_color("texto_sec", dark))
     upload_info = ft.Text(
-        "Nenhum material enviado.",
+        "Nenhum material anexado.",
         size=12,
-        weight=ft.FontWeight.W_400,
-        color=_color("texto_sec", dark),
+        weight=ft.FontWeight.W_600,
+        color=_color("texto", dark),
         max_lines=2,
         overflow=ft.TextOverflow.ELLIPSIS,
-        visible=False,
     )
     material_source_hint = ft.Text(
-        "",
+        "Voce pode continuar so com o topico ou anexar um material para orientar a IA.",
         size=11,
         color=_color("texto_sec", dark),
-        visible=False,
+        visible=True,
+    )
+    material_helper_text = ft.Text(
+        "Anexe um PDF/TXT ou use um arquivo da biblioteca. Quando houver material, a IA prioriza esse conteudo na geracao.",
+        size=12,
+        color=_color("texto_sec", dark),
+    )
+    material_status_label = ft.Text("Opcional", size=11, weight=ft.FontWeight.W_500, color=DS.WHITE)
+    material_status_chip = ft.Container(
+        content=material_status_label,
+        bgcolor=DS.G_500,
+        border_radius=DS.R_PILL,
+        padding=ft.padding.symmetric(horizontal=10, vertical=4),
+    )
+    clear_material_button = ft.TextButton("Limpar material", icon=ft.Icons.DELETE_OUTLINE)
+    material_clear_container = ft.Container(content=clear_material_button, visible=False)
+    material_state_panel = ft.Container(
+        padding=ft.padding.symmetric(horizontal=DS.SP_12, vertical=DS.SP_10),
+        border=ft.border.all(1, DS.with_opacity(DS.P_500, 0.20)),
+        border_radius=DS.R_MD,
+        bgcolor=DS.with_opacity(DS.P_500, 0.08),
     )
     ai_enabled = bool(create_user_ai_service(user))
     study_footer_actions = ft.ResponsiveRow([], run_spacing=6, spacing=10, visible=True)
@@ -530,10 +557,10 @@ def build_quiz_body(state, navigate, dark: bool):
             page.update()
 
     library_dropdown = ft.Dropdown(
-        label="Adicionar da Biblioteca",
-        width=field_w_small if compact else 300,
+        label="Ou escolher da biblioteca",
         options=library_opts,
-        disabled=not library_opts
+        disabled=not library_opts,
+        expand=True,
     )
     library_dropdown.on_change = _on_library_select
 
@@ -746,17 +773,55 @@ def build_quiz_body(state, navigate, dark: bool):
 
     def _set_upload_info():
         names = estado["upload_names"] or estado.get("upload_selected_names") or []
-        upload_info.value = format_upload_info_label(names)
-        upload_info.visible = bool(names)
-        if estado.get("upload_texts"):
-            material_source_hint.value = "Fonte ativa: material anexado. As questoes serao geradas desse conteudo."
-            material_source_hint.visible = True
+        names_label = format_upload_info_label(names)
+        has_material_text = bool(estado.get("upload_texts"))
+        material_clear_container.visible = bool(names or has_material_text)
+        if has_material_text:
+            upload_info.value = names_label
+            material_source_hint.value = "Pronto para gerar questoes com base nesse material. O app usa essa fonte como prioridade."
+            material_status_label.value = "Pronto"
+            material_status_chip.bgcolor = DS.SUCESSO
+            panel_icon = ft.Icons.CHECK_CIRCLE_OUTLINE
+            panel_icon_color = DS.SUCESSO
+            panel_bg = DS.with_opacity(DS.SUCESSO, 0.08)
+            panel_border = ft.border.all(1, DS.with_opacity(DS.SUCESSO, 0.28))
         elif names:
-            material_source_hint.value = "Arquivo selecionado, mas sem texto extraido. Gere apenas apos carregar texto do PDF."
-            material_source_hint.visible = True
+            upload_info.value = names_label
+            material_source_hint.value = "Arquivo selecionado, mas sem texto extraido. Use um PDF pesquisavel, TXT ou outro material."
+            material_status_label.value = "Atencao"
+            material_status_chip.bgcolor = DS.WARNING
+            panel_icon = ft.Icons.WARNING_AMBER_ROUNDED
+            panel_icon_color = DS.WARNING
+            panel_bg = DS.with_opacity(DS.WARNING, 0.10)
+            panel_border = ft.border.all(1, DS.with_opacity(DS.WARNING, 0.30))
         else:
-            material_source_hint.value = ""
-            material_source_hint.visible = False
+            upload_info.value = "Nenhum material anexado"
+            material_source_hint.value = "Voce pode gerar so com o topico ou anexar um material para deixar a geracao mais precisa."
+            material_status_label.value = "Opcional"
+            material_status_chip.bgcolor = DS.G_500
+            panel_icon = ft.Icons.AUTO_AWESOME_OUTLINED
+            panel_icon_color = DS.P_500 if not dark else DS.P_300
+            panel_bg = DS.with_opacity(DS.P_500, 0.08)
+            panel_border = ft.border.all(1, DS.with_opacity(DS.P_500, 0.20))
+        material_state_panel.bgcolor = panel_bg
+        material_state_panel.border = panel_border
+        material_state_panel.content = ft.Row(
+            [
+                ft.Icon(panel_icon, size=18, color=panel_icon_color),
+                ft.Container(
+                    expand=True,
+                    content=ft.Column(
+                        [
+                            upload_info,
+                            material_source_hint,
+                        ],
+                        spacing=3,
+                    ),
+                ),
+            ],
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
 
     async def _pick_files_async():
         if not page:
@@ -847,6 +912,76 @@ def build_quiz_body(state, navigate, dark: bool):
             _confirmed_clear,
             confirm_label="Limpar",
         )
+
+    clear_material_button.on_click = _limpar_material
+
+    material_entry_section = ds_card(
+        dark=dark,
+        padding=DS.SP_12,
+        shadow=False,
+        border_radius=DS.R_MD,
+        border_color=DS.border_color(dark, 0.12),
+        bgcolor=DS.with_opacity(DS.P_500, 0.04),
+        content=ft.Column(
+            [
+                ft.ResponsiveRow(
+                    [
+                        ft.Container(
+                            col={"xs": 12, "md": 8},
+                            content=ft.Column(
+                                [
+                                    ft.Row(
+                                        [
+                                            ft.Icon(ft.Icons.UPLOAD_FILE, size=18, color=DS.P_500 if not dark else DS.P_300),
+                                            ft.Text(
+                                                "Usar material como base",
+                                                size=14,
+                                                weight=ft.FontWeight.W_600,
+                                                color=_color("texto", dark),
+                                            ),
+                                        ],
+                                        spacing=8,
+                                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                    ),
+                                    material_helper_text,
+                                ],
+                                spacing=4,
+                            ),
+                        ),
+                        ft.Container(
+                            col={"xs": 12, "md": 4},
+                            content=ft.Row(
+                                [
+                                    material_status_chip,
+                                    ft.Container(expand=True),
+                                    material_clear_container,
+                                ],
+                                spacing=8,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                        ),
+                    ],
+                    spacing=10,
+                    run_spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.ResponsiveRow(
+                    [
+                        ft.Container(
+                            col={"xs": 12, "md": 4},
+                            content=ds_btn_primary("Anexar PDF/TXT", icon=ft.Icons.UPLOAD_FILE, on_click=_upload_material, expand=True, dark=dark),
+                        ),
+                        ft.Container(col={"xs": 12, "md": 8}, content=library_dropdown),
+                    ],
+                    run_spacing=6,
+                    spacing=10,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                material_state_panel,
+            ],
+            spacing=DS.SP_10,
+        ),
+    )
 
     async def _on_explain_click(q_idx):
         if not page: return
@@ -1969,6 +2104,8 @@ def build_quiz_body(state, navigate, dark: bool):
             referencia = filtro.get("referencia") or []
             strict_material_source = bool(filtro.get("source_lock_material"))
             difficulty_key = filtro.get("difficulty") or dificuldade_padrao
+            if not has_quiz_generation_context(topic, referencia):
+                return
             gen_profile = generation_profile(user, "quiz")
             service = create_user_ai_service(user, force_economic=bool(gen_profile.get("force_economic")))
             novas = []
@@ -2002,7 +2139,7 @@ def build_quiz_body(state, navigate, dark: bool):
                                     questoes.append(dict(qnorm))
                                     if db:
                                         try:
-                                            db.salvar_questao_cache(topic or "Geral", difficulty_key, qnorm)
+                                            db.salvar_questao_cache(topic or "Geral", difficulty_key, qnorm, user_id=int(user["id"]) if user.get("id") else None)
                                         except Exception as ex:
                                             log_exception(ex, "main._build_quiz_body.prefetch.salvar_questao_cache")
                             if novas:
@@ -2014,7 +2151,7 @@ def build_quiz_body(state, navigate, dark: bool):
             # Fallback: cache ou defaults
             if not novas and (not strict_material_source) and topic and db:
                 try:
-                    cached = db.listar_questoes_cache(topic, difficulty_key, batch_size)
+                    cached = db.listar_questoes_cache(topic, difficulty_key, batch_size, user_id=int(user["id"]) if user.get("id") else None)
                     for x in cached:
                         qnorm = _normalize_question_for_ui(x)
                         if qnorm and (not _looks_like_material_metadata_question(qnorm)):
@@ -2024,12 +2161,6 @@ def build_quiz_body(state, navigate, dark: bool):
                                 break
                 except Exception as ex:
                     log_exception(ex, "main._build_quiz_body.prefetch.cache")
-            if not novas and (not strict_material_source):
-                for _ in range(min(batch_size, len(DEFAULT_QUIZ_QUESTIONS))):
-                    fallback = random.choice(DEFAULT_QUIZ_QUESTIONS)
-                    if not _looks_like_material_metadata_question(fallback):
-                        novas.append(dict(fallback))
-                        questoes.append(dict(fallback))
             if novas:
                 msg_prefix = "Modo continuo"
                 set_feedback_text(status_text, f"{msg_prefix}: +{len(novas)} questoes prontas ({len(questoes)} total).", "info")
@@ -3123,7 +3254,7 @@ def build_quiz_body(state, navigate, dark: bool):
                                     if db:
                                         try:
                                             tema_cache = topic or "Geral"
-                                            db.salvar_questao_cache(tema_cache, difficulty_key, geradas[-1])
+                                            db.salvar_questao_cache(tema_cache, difficulty_key, geradas[-1], user_id=int(user["id"]) if user.get("id") else None)
                                         except Exception as ex_cache:
                                             log_exception(ex_cache, "main._build_quiz_body.salvar_questao_cache")
                     if appended_any:
@@ -3140,7 +3271,7 @@ def build_quiz_body(state, navigate, dark: bool):
                         if db:
                             try:
                                 tema_cache = topic or "Geral"
-                                db.salvar_questao_cache(tema_cache, difficulty_key, geradas[-1])
+                                db.salvar_questao_cache(tema_cache, difficulty_key, geradas[-1], user_id=int(user["id"]) if user.get("id") else None)
                             except Exception as ex_cache:
                                 log_exception(ex_cache, "main._build_quiz_body.salvar_questao_cache")
                         continue
@@ -3184,23 +3315,13 @@ def build_quiz_body(state, navigate, dark: bool):
                 return
             try:
                 fetch_limit = max(int(target_total) * 4, 40)
-                cache_items = db.listar_questoes_cache(topic, difficulty_key, fetch_limit) or []
+                cache_items = db.listar_questoes_cache(topic, difficulty_key, fetch_limit, user_id=int(user["id"]) if user.get("id") else None) or []
                 for item in cache_items:
                     if len(geradas) >= int(target_total):
                         break
                     _append_generated_question(item, update_live=True)
             except Exception as ex_cache:
                 log_exception(ex_cache, "main._build_quiz_body.listar_questoes_cache")
-        def _fill_from_defaults_unique(target_total: int) -> None:
-            if len(geradas) >= int(target_total):
-                return
-            pool = list(DEFAULT_QUIZ_QUESTIONS)
-            random.shuffle(pool)
-            for item in pool:
-                if len(geradas) >= int(target_total):
-                    break
-                _append_generated_question(item, update_live=True)
-
         if db and user.get("id") and session_mode != "nova":
             try:
                 geradas_db = db.listar_questoes_usuario(user["id"], modo=session_mode, limite=quantidade) or []
@@ -3208,6 +3329,17 @@ def build_quiz_body(state, navigate, dark: bool):
                     _append_generated_question(item, update_live=False)
             except Exception as ex:
                 log_exception(ex, "main._build_quiz_body.listar_questoes_usuario")
+
+        if not geradas and not has_quiz_generation_context(topic, referencia):
+            msg = "Informe um topico ou anexe um material para gerar questoes." if session_mode == "nova" else "Sem questoes salvas para essa sessao. Informe um topico ou anexe um material."
+            set_feedback_text(status_text, msg, "warning")
+            set_feedback_text(status_estudo, msg, "warning")
+            carregando.visible = False
+            generate_button.disabled = False
+            _refresh_status_boxes()
+            if page:
+                page.update()
+            return
 
         if gen_profile.get("delay_s", 0) > 0:
             await asyncio.sleep(float(gen_profile["delay_s"]))
@@ -3273,8 +3405,6 @@ def build_quiz_body(state, navigate, dark: bool):
                 generate_button.disabled = False
                 page.update()
                 return
-            if not geradas:
-                _fill_from_defaults_unique(quantidade)
             if issue_kind == "quota":
                 set_feedback_text(status_text, f"Cotas da IA esgotadas. Modo offline: {len(geradas)} questoes prontas.", "warning")
                 show_api_issue_dialog(
@@ -3298,8 +3428,6 @@ def build_quiz_body(state, navigate, dark: bool):
         else:
             if (not material_source_locked) and len(geradas) < quantidade:
                 _fill_from_cache_unique(quantidade)
-            if (not material_source_locked) and len(geradas) < quantidade:
-                _fill_from_defaults_unique(quantidade)
             if service and (topic or referencia) and len(geradas) < quantidade:
                 await _fill_missing_with_ai_unique(quantidade)
             if session_mode == "nova":
@@ -3550,21 +3678,6 @@ def build_quiz_body(state, navigate, dark: bool):
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             referencia_field,
-            ft.ResponsiveRow(
-                [
-                    ft.Container(
-                        col={"xs": 12, "md": 3},
-                        content=ft.ElevatedButton("Anexar material", icon=ft.Icons.UPLOAD_FILE, on_click=_upload_material, expand=True),
-                    ),
-                    ft.Container(col={"xs": 12, "md": 5}, content=library_dropdown),
-                    ft.Container(col={"xs": 12, "md": 4}, content=ft.TextButton("Limpar material", on_click=_limpar_material)),
-                    ft.Container(col={"xs": 12, "md": 12}, content=upload_info),
-                    ft.Container(col={"xs": 12, "md": 12}, content=material_source_hint),
-                ],
-                run_spacing=6,
-                spacing=10,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
             ft.Row(
                 [
                     save_filter_name,
@@ -3602,6 +3715,7 @@ def build_quiz_body(state, navigate, dark: bool):
                             spacing=12,
                             run_spacing=8,
                         ),
+                        material_entry_section,
                         ft.ResponsiveRow(
                             [
                                 ft.Container(content=advanced_filters_button, col={"xs": 12, "md": 5}),

@@ -7,6 +7,7 @@ import unittest
 import json
 from core.ai_service_v2 import GeminiProvider, OpenAIProvider, AIService, create_ai_provider
 from config import CORES, AI_PROVIDERS
+from ui.views.quiz_view import has_quiz_generation_context
 
 
 class TestAIService(unittest.TestCase):
@@ -203,6 +204,33 @@ class TestDatabase(unittest.TestCase):
         self.assertFalse(faltando, f"Tabelas faltando: {faltando}")
         conn.close()
         print("âœ… Banco criado com tabelas essenciais")
+
+    def test_question_cache_is_scoped_per_user(self):
+        """Cache de questoes nao deve vazar entre usuarios."""
+        from core.database_v2 import Database
+        db = Database(db_path=self.test_db)
+        db.iniciar_banco()
+        ok1, _ = db.criar_conta("user1", "user1@test.local", "123456", "01/01/2000")
+        ok2, _ = db.criar_conta("user2", "user2@test.local", "123456", "01/01/2000")
+        self.assertTrue(ok1)
+        self.assertTrue(ok2)
+        user1 = db.fazer_login("user1@test.local", "123456")
+        user2 = db.fazer_login("user2@test.local", "123456")
+        uid1 = int(user1["id"])
+        uid2 = int(user2["id"])
+
+        questao = {
+            "enunciado": "Teste de cache isolado",
+            "alternativas": ["A", "B", "C", "D"],
+            "correta_index": 0,
+        }
+        db.salvar_questao_cache("Algoritmos", "intermediario", questao, user_id=uid1)
+
+        cache_uid1 = db.listar_questoes_cache("Algoritmos", "intermediario", 10, user_id=uid1)
+        cache_uid2 = db.listar_questoes_cache("Algoritmos", "intermediario", 10, user_id=uid2)
+
+        self.assertEqual(len(cache_uid1), 1)
+        self.assertEqual(len(cache_uid2), 0)
 
     def test_daily_limit_usage(self):
         """Prompt 4/6: limite diário deve bloquear excedente."""
@@ -648,6 +676,7 @@ def run_all_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestComponents))
     suite.addTests(loader.loadTestsFromTestCase(TestDatabase))
     suite.addTests(loader.loadTestsFromTestCase(TestSchemaValidation))
+    suite.addTests(loader.loadTestsFromTestCase(TestQuizGenerationContext))
     
     # Executar
     runner = unittest.TextTestRunner(verbosity=2)
@@ -664,6 +693,14 @@ def run_all_tests():
     print(f"âš ï¸  Erros: {len(result.errors)}")
     
     return result.wasSuccessful()
+
+
+class TestQuizGenerationContext(unittest.TestCase):
+    def test_has_quiz_generation_context_requires_topic_or_reference(self):
+        self.assertFalse(has_quiz_generation_context("", []))
+        self.assertFalse(has_quiz_generation_context("   ", ["   "]))
+        self.assertTrue(has_quiz_generation_context("Direito Administrativo", []))
+        self.assertTrue(has_quiz_generation_context("", ["texto do material"]))
 
 
 if __name__ == "__main__":
