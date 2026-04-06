@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: quiz-vance-backend
+    runtime: docker
+    plan: free
+    region: virginia
+    rootDir: backend
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health/ready
+    envVars:
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: TELEGRAM_AUTO_POST_ENABLED
+        value: "0"
+      - key: APP_BACKEND_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
